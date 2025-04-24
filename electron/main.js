@@ -264,6 +264,17 @@ function resolveCommandPath(command) {
     return command;
   }
 
+  // On Windows we prefer to invoke the command directly rather than a POSIX shell wrapper (.sh)
+  // because those wrapper scripts are not executable in the default Windows environment.
+  // This early return ensures that commands like "node" resolve to the command that should
+  // already be available in the PATH instead of our helper shell script (run-node.sh), which
+  // was designed for Unix-like systems. Trying to execute a .sh script on Windows causes the
+  // transport process to exit immediately, leading to connection failures such as
+  // "MCP error -32000: Connection closed".
+  if (process.platform === 'win32') {
+    return command;
+  }
+   
   const scriptBasePath = getScriptsBasePath(); // Use helper
 
   // Define configurations for commands that might need special handling or scripts
