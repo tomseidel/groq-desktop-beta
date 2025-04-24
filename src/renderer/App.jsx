@@ -98,6 +98,15 @@ function App() {
   // Models list derived from capabilities keys
   // const models = Object.keys(MODEL_CAPABILITIES).filter(key => key !== 'default');
 
+  // Function to clear the entire chat
+  const handleClearChat = () => {
+    setMessages([]); // Clear messages from context
+    setPendingApprovalCall(null); // Clear any pending tool approvals
+    setPausedChatState(null); // Clear any paused state
+    setLoading(false); // Ensure loading indicator is off
+    console.log("Chat cleared.");
+  };
+
   // Function to update the server status display - moved outside useEffect
   const updateServerStatus = (tools, settings) => {
     try {
@@ -830,6 +839,14 @@ function App() {
               </select>
             </div>
             <Link to="/settings" className="btn btn-primary">Settings</Link>
+            {/* Add Clear Chat Button */}
+            <button 
+              onClick={handleClearChat} 
+              className="btn btn-secondary" // You might need to define btn-secondary styles
+              title="Clear Chat History"
+            >
+              Clear Chat
+            </button>
           </div>
         </div>
       </header>
