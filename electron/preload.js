@@ -75,5 +75,21 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('mcp-log-update', listener);
     // Return a function to remove the listener
     return () => ipcRenderer.removeListener('mcp-log-update', listener);
+  },
+  
+  // --- File Extraction IPC --- 
+  requestFileExtraction: (filePath, uniqueId) => {
+      console.log(`[Preload] Sending request-file-extraction for ID: ${uniqueId}, Path: ${filePath}`);
+      ipcRenderer.send('request-file-extraction', filePath, uniqueId);
+  },
+  onFileExtractionStatus: (callback) => {
+       const listener = (event, data) => callback(event, data); // Pass event too, just in case
+       console.log('[Preload] Setting up listener for file-extraction-status');
+       ipcRenderer.on('file-extraction-status', listener);
+       return () => {
+            console.log('[Preload] Removing listener for file-extraction-status');
+            ipcRenderer.removeListener('file-extraction-status', listener);
+       };
   }
+  // --- End File Extraction IPC ---
 }); 

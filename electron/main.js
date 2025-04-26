@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, screen, shell, net } = require('electron');
 const fs   = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { extractTextFromFile } = require('./fileExtractor');
 
 // Create ~/Library/Logs/Groq Desktop if it does not exist
 app.setAppLogsPath();
@@ -157,16 +158,42 @@ async function fetchOpenRouterModels(apiKey) {
                         const models = {};
                         if (data && Array.isArray(data.data)) {
                             data.data.forEach(model => {
-                                // Map OpenRouter fields (assuming structure from Gist)
-                                // Determine vision support (needs a heuristic or assumption)
-                                const vision_supported = model.id.includes('vision') || model.id.includes('claude-3'); // Basic heuristic
+                                // Map OpenRouter fields
+                                //console.log(`[OpenRouter Fetch] Processing model: ${model.id}, Name: ${model.name}`); // Log model ID
+                                if (model.architecture) {
+                                    //console.log(`  Architecture: ${JSON.stringify(model.architecture)}`); // Log architecture object
+                                } else {
+                                     //console.log(`  Architecture field missing for ${model.id}`);
+                                }
+                                
+                                // --- Determine vision support reliably ---
+                                let vision_supported = false;
+                                if (model.architecture && Array.isArray(model.architecture.input_modalities)) {
+                                    vision_supported = model.architecture.input_modalities.includes('image');
+                                } else {
+                                    // Fallback heuristic if architecture info is missing (less reliable)
+                                    //console.warn(`Missing architecture.input_modalities for ${model.id}, using fallback heuristic.`);
+                                     vision_supported = model.id.includes('vision') || model.id.includes('claude-3') || model.id.includes('gpt-4o'); // Slightly improved fallback
+                                }
+                                // --- End vision support check ---
+                                
                                 models[model.id] = {
                                     id: model.id,
                                     name: model.name || model.id, // Use name if available
-                                    context: model.context_length || FALLBACK_MODEL_DEFINITIONS['default'].context, // Use provided context length or fallback
+                                    context: model.context_length || FALLBACK_MODEL_DEFINITIONS['default']?.context || 8192, // Use provided context, default fallback context, or final fallback
                                     vision_supported: vision_supported,
-                                    // Add other fields like pricing if needed later
+                                    // --- Store Pricing Info (as number per token and original string) ---
+                                    prompt_cost_per_token: model.pricing?.prompt ? parseFloat(model.pricing.prompt) : null, // Store numeric cost per token
+                                    completion_cost_per_token: model.pricing?.completion ? parseFloat(model.pricing.completion) : null, // Store numeric cost per token
+                                    pricing_string_prompt: model.pricing?.prompt, // Keep original string 
+                                    pricing_string_completion: model.pricing?.completion, // Keep original string
+                                    // --- End Pricing Info ---
                                 };
+                                
+                                // Log pricing info if found
+                                // if (model.pricing) {
+                                //      console.log(`  Pricing for ${model.id}: ${JSON.stringify(model.pricing)} -> Stored per token: prompt=${models[model.id].prompt_cost_per_token}, completion=${models[model.id].completion_cost_per_token}`);
+                                // }
                             });
                         } else {
                             console.warn('OpenRouter API response did not contain expected data structure.', data);
@@ -505,6 +532,41 @@ app.whenReady().then(async () => {
     }
   });
   // --- End Rename Chat Handler ---
+
+  // --- File Extraction Handler ---
+  ipcMain.on('request-file-extraction', async (event, filePath, uniqueId) => {
+      console.log(`[IPC Main] Received request-file-extraction for ID: ${uniqueId}, Path: ${filePath}`);
+      if (!filePath || !uniqueId) {
+          console.error("[IPC Main] Invalid request-file-extraction: Missing filePath or uniqueId.");
+          // Send error back immediately?
+          event.sender.send('file-extraction-status', { uniqueId, status: 'error', error: 'Invalid request data.' });
+          return;
+      }
+
+      // Send initial 'extracting' status
+      event.sender.send('file-extraction-status', { uniqueId, status: 'extracting' });
+
+      try {
+          // TODO: Add file path validation here for security
+          // e.g., check if path is within expected directories
+
+          const extractedText = await extractTextFromFile(filePath);
+          console.log(`[IPC Main] Extraction complete for ID: ${uniqueId}`);
+          event.sender.send('file-extraction-status', { 
+              uniqueId, 
+              status: 'complete', 
+              result: extractedText 
+          });
+      } catch (error) {
+          console.error(`[IPC Main] Extraction failed for ID: ${uniqueId}`, error);
+          event.sender.send('file-extraction-status', { 
+              uniqueId, 
+              status: 'error', 
+              error: error.message || 'Unknown extraction error' 
+          });
+      }
+  });
+  // --- End File Extraction Handler ---
 
   // --- Post-initialization Tasks --- //
 

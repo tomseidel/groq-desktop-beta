@@ -6,9 +6,7 @@ import ToolsPanel from './components/ToolsPanel';
 import ToolApprovalModal from './components/ToolApprovalModal';
 import ChatListSidebar from './components/ChatListSidebar';
 import { useChat } from './context/ChatContext'; // Import useChat hook
-// Import shared model definitions - REMOVED
-// import { MODEL_CONTEXT_SIZES } from '../../shared/models';
-
+// import { get_encoding } from "@dqbd/tiktoken"; // Removed
 
 // LocalStorage keys
 const TOOL_APPROVAL_PREFIX = 'tool_approval_';
@@ -202,15 +200,38 @@ function App() {
     const existingChat = savedChats.find(chat => chat.id === activeChatId);
     const title = existingChat?.title; // Use existing title if available
 
+    // --- Transform messages for saving (match display format) ---
+    const transformedMessages = messagesToSave.map(msg => {
+        if (msg.role === 'user' && Array.isArray(msg.content)) {
+            const newContent = msg.content.map(part => {
+                if (part.type === 'file_content') {
+                    return { type: 'text', text: `[Content of file: ${part.name}]
+
+${part.content}` };
+                } else if (part.type === 'file_error') {
+                    return { type: 'text', text: `[Error processing file: ${part.name}: ${part.error}]` };
+                }
+                return part; // Keep other parts (text, image_url) as is
+            });
+            return { ...msg, content: newContent };
+        }
+        return msg; // Return non-user messages or user messages with string content unmodified
+    });
+    // --- End transformation ---
+
     const chatDataToSave = {
       id: activeChatId, // Will be null for a new chat, backend generates ID
-      messages: messagesToSave,
+      messages: transformedMessages, // Use transformed messages for saving
       platform: selectedPlatform,
       model: selectedModel,
       // Only include title if we found one (for existing chats)
       // For new chats, the backend will generate a title
       ...(title && { title: title }),
     };
+
+    // --- Log messages being saved ---
+    console.log(`[saveCurrentChat] Saving transformed messages:`, JSON.stringify(transformedMessages, null, 2));
+    // --- End Log ---
 
     console.log(`[saveCurrentChat] Preparing to save chat ${chatDataToSave.id ? 'ID: ' + chatDataToSave.id : '(new)'}. Platform: ${chatDataToSave.platform}, Model: ${chatDataToSave.model}`);
     try {
@@ -692,7 +713,9 @@ function App() {
         };
 
         // Setup event handlers for streaming
-        streamHandler.onStart(() => { /* Placeholder exists */ });
+        streamHandler.onStart((startData) => { 
+            /* Placeholder exists */ 
+        });
 
         streamHandler.onContent(({ content }) => {
             finalAssistantData.content += content;
@@ -730,6 +753,7 @@ function App() {
         // Handle stream completion
         await new Promise((resolve, reject) => {
             streamHandler.onComplete((data) => {
+                 console.log("[App.jsx onComplete] Received data:", JSON.stringify(data, null, 2)); // Log received data
                 // Final assistant message data is complete here
                 finalAssistantData = {
                     role: 'assistant',
@@ -738,7 +762,7 @@ function App() {
                     reasoning: data.reasoning
                 };
                 turnAssistantMessage = finalAssistantData; // Store the completed message
-
+                
                 // Replace the placeholder with the final, non-streaming message
                 setMessages(prevMessages => {
                     // Find the index of the streaming message *in the current state*
@@ -757,13 +781,30 @@ function App() {
             });
 
             streamHandler.onError(({ error }) => {
-                 // ... (error handling updates UI state) ...
-                 setMessages(prev => {
-                     // ... (logic to update messages state with error) ...
-                    // Don't update finalTurnMessages here anymore
-                     return newMessages;
+                 // Update the UI to show the error message
+                 setMessages(prevMessages => {
+                    // Find the streaming placeholder message
+                    const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
+                    if (streamingMsgIndex !== -1) {
+                        // Replace placeholder with an error message
+                        const updatedMessages = [...prevMessages];
+                        updatedMessages[streamingMsgIndex] = {
+                            role: 'assistant',
+                            content: `Stream Error: ${error || 'Unknown streaming error'}`,
+                            isStreaming: false // Ensure streaming is off
+                        };
+                        return updatedMessages;
+                    } else {
+                        // If placeholder not found, just append the error message
+                        console.warn("[onError] Streaming placeholder not found, appending error message.");
+                        return [
+                            ...prevMessages,
+                            { role: 'assistant', content: `Stream Error: ${error || 'Unknown streaming error'}` }
+                        ];
+                    }
                  });
-                 reject(new Error(error));
+                 // Reject the promise to signal the error to the calling function
+                 reject(new Error(error || 'Unknown streaming error'));
             });
         });
 
@@ -1166,6 +1207,7 @@ function App() {
 
   // --- Calculate derived state --- //
   const isVisionSupported = allPlatformModels[selectedPlatform]?.[selectedModel]?.vision_supported || false;
+  const currentModelInfo = allPlatformModels[selectedPlatform]?.[selectedModel] || null;
 
   return (
     <div className="flex flex-row h-screen bg-gray-900">
@@ -1264,12 +1306,27 @@ function App() {
                     )}
                   </div>
                 </div>
+                {/* --- Model Pricing Display --- */}
+                <div className="text-xs text-gray-400 text-right">
+                    {currentModelInfo && currentModelInfo.prompt_cost_per_token !== null && currentModelInfo.completion_cost_per_token !== null ? (
+                        <span>
+                           {/* Display pricing per Million tokens by multiplying cost per token */}
+                           Pricing: ${(currentModelInfo.prompt_cost_per_token * 1000000).toFixed(2)}/M Prompt | ${(currentModelInfo.completion_cost_per_token * 1000000).toFixed(2)}/M Completion
+                        </span>
+                    ) : selectedPlatform === 'openrouter' ? (
+                        <span>Pricing info unavailable</span>
+                    ) : (
+                         <span>(Pricing N/A for Groq)</span>
+                    )}
+                </div>
+                {/* --- End Model Pricing Display --- */}
               </div>
 
               <ChatInput
                 onSendMessage={handleSendMessage}
                 loading={loading}
                 visionSupported={isVisionSupported}
+                selectedPlatform={selectedPlatform}
               />
             </div>
           </div>

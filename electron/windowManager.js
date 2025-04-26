@@ -11,7 +11,10 @@ function createWindow(screen, BrowserWindow) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js') // Assumes preload.js is in the same directory
+      preload: path.join(__dirname, 'preload.js'), // Assumes preload.js is in the same directory
+      // Disable webSecurity in development to bypass CSP issues (e.g., for WASM/tiktoken)
+      // WARNING: Do NOT disable this in production builds.
+      ...(process.env.NODE_ENV === 'development' && { webSecurity: false }),
     }
   });
 

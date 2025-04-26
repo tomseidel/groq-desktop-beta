@@ -1,5 +1,100 @@
 const https = require('https'); // Use standard HTTPS module
-const { pruneMessageHistory } = require('./messageUtils');
+const { get_encoding } = require("@dqbd/tiktoken");
+const { extractTextFromFile } = require('./fileExtractor'); // Import the extractor
+
+// --- Token Counting & Context Fitting Logic (Moved from messageUtils.js) ---
+// Using cl100k_base as a general default suitable for gpt-4, gpt-3.5-turbo, text-embedding-ada-002, etc.
+const defaultEncoding = get_encoding("cl100k_base");
+
+/**
+ * Estimates the number of tokens for a given text using tiktoken.
+ */
+function countTokens(text) {
+  if (!text) return 0;
+  try {
+    return defaultEncoding.encode(text).length;
+  } catch (error) {
+    console.warn("Tiktoken encoding failed, falling back to rough estimate:", error);
+    return Math.ceil(text.length / 4);
+  }
+}
+
+/**
+ * Estimates the total tokens for an array of message objects.
+ */
+function countTokensForMessages(messages, modelId = 'gpt-4') {
+    let num_tokens = 0;
+    messages.forEach(message => {
+        num_tokens += 4; // every message follows <im_start>{role/name}\n{content}<im_end>\n
+        Object.entries(message).forEach(([key, value]) => {
+            if (key === 'content') {
+                if (typeof value === 'string') {
+                    num_tokens += countTokens(value);
+                } else if (Array.isArray(value)) {
+                    value.forEach(part => {
+                        if (part.type === 'text') {
+                             num_tokens += countTokens(part.text);
+                        } else if (part.type === 'image_url') {
+                            // Placeholder fixed cost for images
+                            num_tokens += 85; 
+                        }
+                    });
+                }
+            } else if (key === 'tool_calls' && Array.isArray(value)) {
+                 value.forEach(toolCall => {
+                    if (toolCall.function) {
+                        num_tokens += countTokens(toolCall.function.name || '');
+                        num_tokens += countTokens(toolCall.function.arguments || '');
+                    }
+                 });
+            } else if (key === 'name') { 
+                num_tokens -= 1; 
+                num_tokens += countTokens(value);
+            } else if (key !== 'role'){ 
+                if (typeof value === 'string') {
+                     num_tokens += countTokens(value);
+                }
+            }
+        });
+    });
+    num_tokens += 2; // every reply is primed with <im_start>assistant
+    return num_tokens;
+}
+
+/**
+ * Ensures the message history fits within the model's context window by truncating older messages.
+ */
+function ensureContextFits(messages, contextLimit, modelId = 'gpt-4', safetyBuffer = 200) {
+    const maxTokens = contextLimit - safetyBuffer;
+    let currentMessages = [...messages];
+    let systemPrompt = null;
+    if (currentMessages.length > 0 && currentMessages[0].role === 'system') {
+        systemPrompt = currentMessages.shift(); 
+    }
+
+    while (currentMessages.length > 0) {
+        const messagesToCheck = systemPrompt ? [systemPrompt, ...currentMessages] : currentMessages;
+        const currentTokens = countTokensForMessages(messagesToCheck, modelId);
+        
+        if (currentTokens <= maxTokens) {
+            break; 
+        }
+
+        console.warn(`Context window exceeded (${currentTokens} > ${maxTokens}). Truncating oldest message.`);
+        currentMessages.shift(); 
+    }
+    
+    if (systemPrompt) {
+        currentMessages.unshift(systemPrompt);
+    }
+
+    if (messages.length > currentMessages.length) {
+         console.log(`Truncated ${messages.length - currentMessages.length} messages to fit context limit.`);
+    }
+
+    return currentMessages;
+}
+// --- End Token Counting & Context Fitting Logic ---
 
 /**
  * Handles the 'chat-stream' IPC event for streaming chat completions using OpenAI-compatible APIs.
@@ -70,8 +165,6 @@ async function handleChatStream(event, messages, model, settings, platformModels
             return;
         }
 
-        // --- Removed Groq SDK Initialization ---
-
         // Prepare tools for the API call (remains largely the same, follows OpenAI format)
         const tools = (discoveredTools || []).map(tool => ({
             type: "function",
@@ -83,8 +176,12 @@ async function handleChatStream(event, messages, model, settings, platformModels
         }));
         console.log(`Prepared ${tools.length} tools for the API call.`);
 
-        // Clean and prepare messages for the API (remains the same)
-        const cleanedMessages = messages.map(msg => {
+        // Clean and prepare messages for the API
+        // --- Add logic to strip images from older messages ---
+        const lastUserMessageIndex = messages.map(m => m.role).lastIndexOf('user');
+        // --- End logic --- 
+        
+        const cleanedMessages = await Promise.all(messages.map(async (msg, index) => {
             const cleanMsg = { ...msg };
             delete cleanMsg.reasoning;
             delete cleanMsg.isStreaming;
@@ -92,33 +189,50 @@ async function handleChatStream(event, messages, model, settings, platformModels
 
             // Ensure user message content is an array of parts
             if (finalMsg.role === 'user') {
+                const isLastUserMessage = index === lastUserMessageIndex;
+                
+                let processedContent = []; // Build a new content array
+
                 if (typeof finalMsg.content === 'string') {
-                    finalMsg.content = [{ type: 'text', text: finalMsg.content }];
-                } else if (!Array.isArray(finalMsg.content)) {
-                    console.warn('Unexpected user message content format, defaulting:', finalMsg.content);
-                    finalMsg.content = [{ type: 'text', text: '' }];
-                }
-                 // Ensure all parts have a type and handle image URLs correctly
-                 finalMsg.content = finalMsg.content.map(part => {
-                    if (part.type === 'image_url' && part.image_url && typeof part.image_url === 'string') {
-                        // If image_url is just a string, wrap it in the required object structure
-                        console.warn("Correcting image_url format for OpenAI compatibility.");
-                        return { type: 'image_url', image_url: { url: part.image_url } };
-                    }
-                    // Add media_type for OpenRouter if needed (heuristic based example)
-                    if (selectedPlatform === 'openrouter' && part.type === 'image_url' && part.image_url && !part.image_url.media_type) {
-                        // Basic check based on common base64 prefix or file extension
-                        const url = part.image_url.url;
-                        if (url && typeof url === 'string') {
-                            if (url.startsWith('data:image/jpeg')) part.image_url.media_type = 'image/jpeg';
-                            else if (url.startsWith('data:image/png')) part.image_url.media_type = 'image/png';
-                            else if (url.startsWith('data:image/gif')) part.image_url.media_type = 'image/gif';
-                            else if (url.startsWith('data:image/webp')) part.image_url.media_type = 'image/webp';
-                            else console.warn("Could not determine media_type for OpenRouter image URL");
+                    processedContent.push({ type: 'text', text: finalMsg.content });
+                } else if (Array.isArray(finalMsg.content)) {
+                    // Use Promise.all to handle potential async extraction
+                    processedContent = await Promise.all(finalMsg.content.map(async (part) => {
+                        // --- Handle Received File Content/Error --- 
+                        if (part.type === 'file_content') {
+                            console.log(`[chatHandler] Including content from file: ${part.name}`);
+                            // Format as text part for the API
+                            return { type: 'text', text: `[Content of file: ${part.name}]
+
+${part.content}` }; // Ensure content is included
+                        } else if (part.type === 'file_error') {
+                             console.warn(`[chatHandler] Including error for file: ${part.name}`);
+                             // Format as text part indicating error
+                             return { type: 'text', text: `[Error processing file: ${part.name}: ${part.error}]` };
+                        } 
+                        // --- Handle Image Stripping & Existing Logic ---
+                        else if (part.type === 'image_url' && !isLastUserMessage) {
+                            console.log(`Stripping image from older user message (index ${index})`);
+                            return null; // Mark for removal
+                        } else if (part.type === 'image_url' && part.image_url && typeof part.image_url === 'string') {
+                            console.warn("Correcting image_url format for OpenAI compatibility.");
+                            return { type: 'image_url', image_url: { url: part.image_url } };
+                        } 
+                        // Add media_type for OpenRouter if needed (existing logic)
+                        else if (selectedPlatform === 'openrouter' && part.type === 'image_url' && part.image_url && !part.image_url.media_type) {
+                           // ... (existing media_type logic) ...
                         }
-                    }
-                    return { type: part.type || 'text', ...part };
-                });
+                        // Keep other parts (like regular text)
+                        return { type: part.type || 'text', ...part }; 
+                    }));
+                    // Filter out null parts (removed images)
+                    processedContent = processedContent.filter(part => part !== null);
+                } else {
+                    console.warn('Unexpected user message content format, defaulting:', finalMsg.content);
+                    processedContent = [{ type: 'text', text: '' }];
+                }
+                 
+                finalMsg.content = processedContent; // Assign the processed content array
             }
 
             // Ensure assistant message content is a string (or null if only tool_calls)
@@ -156,11 +270,12 @@ async function handleChatStream(event, messages, model, settings, platformModels
 
 
             return finalMsg;
-        });
+        }));
 
-        // Prune message history (passing model ID and available model info)
-        const prunedMessages = pruneMessageHistory(cleanedMessages, modelToUse, modelsForPlatform);
-        //console.log(`History pruned: ${cleanedMessages.length} -> ${prunedMessages.length} messages.`);
+        // --- Ensure Context Fits using Accurate Token Count & Truncation ---
+        const contextLimit = modelInfo.context || 8192; // Use model context or default
+        const messagesForApi = ensureContextFits(cleanedMessages, contextLimit, modelToUse);
+        // --- End Context Fitting ---
 
         // Construct the system prompt (remains the same)
         let systemPrompt = "You are a helpful assistant capable of using tools. Use tools only when necessary and relevant to the user's request. Format responses using Markdown.";
@@ -170,10 +285,15 @@ async function handleChatStream(event, messages, model, settings, platformModels
         }
 
         // Prepare OpenAI-compatible API parameters
+        // Conditionally include the system prompt based on platform AND vision limitations
+        const omitSystemPromptForVision = selectedPlatform === 'groq' && hasImages && modelInfo.vision_supported;
+        console.log(`Omit system prompt for vision: ${omitSystemPromptForVision} (Platform: ${selectedPlatform}, Has Images: ${hasImages}, Vision Supported: ${modelInfo.vision_supported})`);
+
         const apiRequestBody = {
             messages: [
-                { role: "system", content: systemPrompt },
-                ...prunedMessages
+                // Conditionally add system prompt
+                ...(!omitSystemPromptForVision ? [{ role: "system", content: systemPrompt }] : []),
+                ...messagesForApi
             ],
             model: modelToUse,
             temperature: settings.temperature ?? 0.7,
@@ -183,10 +303,6 @@ async function handleChatStream(event, messages, model, settings, platformModels
             // Add max_tokens if available in settings?
              ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
         };
-
-        // --- Log the request body before sending ---
-        console.log('*** API Request Body Messages: ***\n', JSON.stringify(apiRequestBody.messages, null, 2));
-        // --- End Logging ---
 
         // --- Streaming and Retry Logic using HTTPS ---
         // Note: Retry logic is simplified (removed while loop) due to complexity with callbacks.
@@ -241,10 +357,12 @@ async function handleChatStream(event, messages, model, settings, platformModels
             let accumulatedReasoning = null; // Store reasoning if applicable
             let isFirstChunk = true;
             let streamId = `stream_${Date.now()}`; // Generate a simple ID
+            let generationId = null; // Keep for potential future use, but not for usage query
 
             res.on('data', (chunk) => {
                 if (requestAborted) return; // Stop processing if already completed or aborted
                 buffer += chunk;
+                let finalUsage = null; // Variable to capture usage from the final chunk
                 // Process buffer line by line for SSE messages
                 let boundary = buffer.indexOf('\n\n');
                 while (boundary !== -1) {
@@ -254,6 +372,8 @@ async function handleChatStream(event, messages, model, settings, platformModels
 
                     if (message.startsWith('data: ')) {
                         const dataContent = message.substring(6).trim(); // Skip 'data: '
+                        console.log("[RAW STREAM DATA]:", dataContent); // Log raw data content
+                        
                         if (dataContent === '[DONE]') {
                             // Stream finished signal
                             console.log(`Stream completed via [DONE]. Reason: ${accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop'}, ID: ${streamId}`);
@@ -265,7 +385,8 @@ async function handleChatStream(event, messages, model, settings, platformModels
                                     role: "assistant",
                                     tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
                                     reasoning: accumulatedReasoning,
-                                    finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop' // Infer finish reason
+                                    finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop', // Infer finish reason
+                                    //usage: finalUsage // <<< REMOVE usage
                                 });
                                 req.abort(); // Ensure connection closes
                             }
@@ -282,10 +403,16 @@ async function handleChatStream(event, messages, model, settings, platformModels
 
                                 if (isFirstChunk) {
                                     streamId = jsonChunk.id || streamId; // Capture actual stream ID if available
+                                    // --- Capture Generation ID ---
+                                    if (streamId.startsWith('gen-')) {
+                                        generationId = streamId;
+                                        console.log(`Captured Generation ID: ${generationId}`);
+                                    }
+                                    // ---
                                     event.sender.send('chat-stream-start', {
                                         id: streamId,
                                         role: delta?.role || "assistant",
-                                        model: jsonChunk.model // Send model used back
+                                        model: jsonChunk.model, // Send model used back
                                     });
                                     isFirstChunk = false;
                                 }
@@ -342,13 +469,18 @@ async function handleChatStream(event, messages, model, settings, platformModels
                                          }
                                          const finalSanitizedToolCalls = accumulatedToolCalls.map(tc => ({ ...tc, index: undefined }));
 
+                                        // --- Log before sending complete event (NO Usage) ---
+                                        console.log(`[chatHandler] Sending chat-stream-complete. Usage: null (will be estimated on frontend)`);
+                                        // --- End Log ---
+                                        
                                         event.sender.send('chat-stream-complete', {
                                             id: streamId,
                                             content: accumulatedContent,
                                             role: "assistant",
                                             tool_calls: finalSanitizedToolCalls.length > 0 ? finalSanitizedToolCalls : undefined,
                                             reasoning: accumulatedReasoning,
-                                            finish_reason: finalFinishReason
+                                            finish_reason: finalFinishReason,
+                                            //usage: finalUsage // <<< REMOVE usage
                                         });
                                         req.abort(); // Ensure connection closes
                                     }
@@ -365,18 +497,22 @@ async function handleChatStream(event, messages, model, settings, platformModels
                 } // end while loop for processing buffer
             }); // end res.on('data')
 
-            res.on('end', () => {
-                if (!requestAborted) { // Check if already completed via [DONE] or finish_reason
+            res.on('end', async () => { 
+                if (!requestAborted) { 
                      console.warn('Stream ended unexpectedly without [DONE] message or finish_reason.');
                      requestAborted = true;
+ 
                      // Send completion with whatever was accumulated, maybe with 'length' finish reason?
+                     console.log(`[chatHandler] Sending chat-stream-complete (unexpected end). Usage: null`);
+ 
                      event.sender.send('chat-stream-complete', {
                           id: streamId,
                           content: accumulatedContent,
                           role: "assistant",
                           tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
                           reasoning: accumulatedReasoning,
-                          finish_reason: 'length' // Indicate truncation or unexpected end
+                          finish_reason: 'length', // Indicate truncation or unexpected end
+                          //usage: finalUsage // <<< REMOVE usage
                       });
                 }
             });

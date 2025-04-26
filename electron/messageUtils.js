@@ -1,177 +1,179 @@
+const { get_encoding, encoding_for_model } = require("@dqbd/tiktoken");
+
+// Using cl100k_base as a general default suitable for gpt-4, gpt-3.5-turbo, text-embedding-ada-002, etc.
+// More specific model-to-encoding mapping can be added if needed.
+const defaultEncoding = get_encoding("cl100k_base");
+
 /**
- * Prunes message history to stay under a target percentage of the model's context window.
- * Prioritizes keeping the system prompt (if any), the most recent messages,
- * and handles image filtering.
- * @param {Array} messages - Complete message history (should be cleaned format)
- * @param {string} modelId - The ID of the selected model (for logging).
- * @param {object} modelsForPlatform - Object containing model info for the current platform, keyed by model ID.
- * @returns {Array} - Pruned message history array
+ * Estimates the number of tokens for a given text using tiktoken.
+ * @param {string} text The text to encode.
+ * @returns {number} The estimated number of tokens.
  */
-function pruneMessageHistory(messages, modelId, modelsForPlatform) {
-  // Handle edge cases: empty array or only one message
-  if (!messages || !Array.isArray(messages) || messages.length <= 1) {
-    return messages ? [...messages] : [];
+function countTokens(text) {
+  if (!text) return 0;
+  try {
+    return defaultEncoding.encode(text).length;
+  } catch (error) {
+    console.warn("Tiktoken encoding failed, falling back to rough estimate:", error);
+    // Fallback to rough character count if encoding fails
+    return Math.ceil(text.length / 4);
   }
+}
 
-  // Determine context window size and target token count
-  const modelInfo = modelsForPlatform[modelId] || { context: 8192, vision_supported: false }; // Use model data or default
-  const effectiveContextWindow = modelInfo.context > 0 ? modelInfo.context : 8192;
-  // Use a higher percentage of the context window, e.g., 80%
-  const TARGET_CONTEXT_PERCENTAGE = 0.80;
-  const targetTokenCount = Math.floor(effectiveContextWindow * TARGET_CONTEXT_PERCENTAGE);
+/**
+ * Estimates the total tokens for an array of message objects.
+ * Follows the format suggested by OpenAI for token counting.
+ * Reference: https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
+ * @param {Array<object>} messages Array of message objects.
+ * @param {string} modelId (Optional) Model ID to potentially use specific encoding. Currently uses default.
+ * @returns {number} Total estimated tokens.
+ */
+function countTokensForMessages(messages, modelId = 'gpt-4') { // modelId currently unused, using default encoder
+    let num_tokens = 0;
+    messages.forEach(message => {
+        num_tokens += 4; // every message follows <im_start>{role/name}\n{content}<im_end>\n
+        Object.entries(message).forEach(([key, value]) => {
+            if (key === 'content') {
+                if (typeof value === 'string') {
+                    num_tokens += countTokens(value);
+                } else if (Array.isArray(value)) {
+                    // Handle array content (text and image_url)
+                    value.forEach(part => {
+                        if (part.type === 'text') {
+                             num_tokens += countTokens(part.text);
+                        } else if (part.type === 'image_url') {
+                            // Token cost for images is complex and varies.
+                            // OpenAI uses a fixed cost + cost based on resolution for GPT-4V.
+                            // Let's use a placeholder fixed cost for simplicity, can be refined.
+                            // See: https://openai.com/pricing (Vision section) - e.g., 85 tokens for low-res, more for high-res.
+                            num_tokens += 85; // Placeholder for a low-res image tile
+                        }
+                    });
+                }
+            } else if (key === 'tool_calls' && Array.isArray(value)) {
+                 // Count tokens for tool calls (function name + arguments)
+                 value.forEach(toolCall => {
+                    if (toolCall.function) {
+                        num_tokens += countTokens(toolCall.function.name || '');
+                        num_tokens += countTokens(toolCall.function.arguments || '');
+                    }
+                 });
+            } else if (key === 'name') { // if there's a name, the role is omitted
+                num_tokens -= 1; // role is always required and always 1 token
+                num_tokens += countTokens(value);
+            } else if (key !== 'role'){ // Skip role as it's implicitly counted in the 4 per message
+                // Count other potential string values (like tool_call_id)
+                if (typeof value === 'string') {
+                     num_tokens += countTokens(value);
+                }
+            }
+        });
+    });
+    num_tokens += 2; // every reply is primed with <im_start>assistant
+    return num_tokens;
+}
 
-  console.log(`Pruning for model ${modelId}. Context: ${effectiveContextWindow}, Target Tokens: ${targetTokenCount} (${TARGET_CONTEXT_PERCENTAGE * 100}%)`);
 
-  // Create a copy to avoid modifying the original array
-  let prunedMessages = [...messages];
-
-  // --- Image Pruning Logic (Keep as is for now) --- //
-  let totalImageCount = 0;
-  let lastUserMessageWithImagesIndex = -1;
-  prunedMessages.forEach((msg, index) => {
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const imageParts = msg.content.filter(part => part.type === 'image_url');
-      if (imageParts.length > 0) {
-        totalImageCount += imageParts.length;
-        lastUserMessageWithImagesIndex = index;
-      }
+/**
+ * Ensures the message history fits within the model's context window by truncating older messages.
+ * Keeps the system prompt if present.
+ * @param {Array<object>} messages The original message array.
+ * @param {number} contextLimit The maximum allowed tokens for the model.
+ * @param {string} modelId (Optional) Model ID for token counting.
+ * @param {number} safetyBuffer A buffer subtracted from the context limit (e.g., 200 tokens).
+ * @returns {Array<object>} The potentially truncated message array.
+ */
+function ensureContextFits(messages, contextLimit, modelId = 'gpt-4', safetyBuffer = 200) {
+    const maxTokens = contextLimit - safetyBuffer;
+    let currentMessages = [...messages];
+    
+    // Separate system prompt if it exists
+    let systemPrompt = null;
+    if (currentMessages.length > 0 && currentMessages[0].role === 'system') {
+        systemPrompt = currentMessages.shift(); // Remove system prompt temporarily
     }
-  });
-  if (totalImageCount > 5 && lastUserMessageWithImagesIndex !== -1) {
-    console.log(`Total image count (${totalImageCount}) exceeds 5. Keeping images only from the last user message (index ${lastUserMessageWithImagesIndex}).`);
-    prunedMessages = prunedMessages.map((msg, index) => {
-      if (msg.role === 'user' && Array.isArray(msg.content) && index !== lastUserMessageWithImagesIndex) {
-        const textParts = msg.content.filter(part => part.type === 'text');
-        if (textParts.length > 0) {
-           return { ...msg, content: textParts };
-        } else {
-           return { ...msg, content: [{ type: 'text', text: '' }] };
+
+    // Remove oldest messages until context fits
+    while (currentMessages.length > 0) {
+        const messagesToCheck = systemPrompt ? [systemPrompt, ...currentMessages] : currentMessages;
+        const currentTokens = countTokensForMessages(messagesToCheck, modelId);
+        
+        if (currentTokens <= maxTokens) {
+            break; // Fits within the limit
         }
-      }
-      return msg;
-    });
-  }
-  // --- End Image Pruning Logic --- //
 
-  // Recalculate tokens after potential image pruning
-  let currentTotalTokens = prunedMessages.reduce((sum, msg) => sum + estimateTokenCount(msg), 0);
+        console.warn(`Context window exceeded (${currentTokens} > ${maxTokens}). Truncating oldest message.`);
+        currentMessages.shift(); // Remove the oldest message (first in the array after potential system prompt)
+    }
+    
+    // Add system prompt back if it existed
+    if (systemPrompt) {
+        currentMessages.unshift(systemPrompt);
+    }
 
-  // If we're already under the target, no text-based pruning needed
-  if (currentTotalTokens <= targetTokenCount) {
-    console.log(`Token count (${currentTotalTokens}) is within target (${targetTokenCount}). No text pruning needed.`);
-    return prunedMessages;
-  }
+    if (messages.length > currentMessages.length) {
+         console.log(`Truncated ${messages.length - currentMessages.length} messages to fit context limit.`);
+    }
 
-  console.log(`Token count (${currentTotalTokens}) exceeds target (${targetTokenCount}). Starting text pruning...`);
-
-  // --- Smarter Text Pruning Logic --- //
-  let messagesPrunedCount = 0;
-
-  // Always keep the first message (index 0), usually system prompt or first user message.
-  const systemMessage = prunedMessages.length > 0 ? prunedMessages[0] : null;
-  // Temporarily remove the system message to simplify pruning loop
-  if (systemMessage) {
-      prunedMessages.shift();
-      currentTotalTokens -= estimateTokenCount(systemMessage);
-  }
-
-  // Prune from the oldest messages (now index 0) upwards, always keeping the last one
-  while (prunedMessages.length > 1 && currentTotalTokens > targetTokenCount) {
-      // Estimate token count of the message to remove (oldest one)
-      const messageToRemove = prunedMessages[0];
-      const tokensForMessage = estimateTokenCount(messageToRemove);
-
-      // Remove the oldest message
-      prunedMessages.shift();
-      currentTotalTokens -= tokensForMessage;
-      messagesPrunedCount++;
-      // console.log(`Pruned oldest message (was role ${messageToRemove.role}). New count: ${prunedMessages.length}, Tokens: ${currentTotalTokens}`);
-  }
-
-  // Add the system message back to the beginning
-  if (systemMessage) {
-      prunedMessages.unshift(systemMessage);
-      // No need to add system message tokens back to currentTotalTokens, as it's just for comparison
-  }
-  // --- End Smarter Text Pruning Logic --- //
-
-  // Final check and logging
-  const finalTokenCount = prunedMessages.reduce((sum, msg) => sum + estimateTokenCount(msg), 0);
-  if (messagesPrunedCount > 0) {
-    console.log(`Pruned ${messagesPrunedCount} messages based on token count. Final tokens: ${finalTokenCount} (target: ${targetTokenCount})`);
-  }
-  if(finalTokenCount > targetTokenCount) {
-      console.warn(`Final token count (${finalTokenCount}) still exceeds target (${targetTokenCount}) after pruning. The last message might be too large.`);
-      // Potentially truncate the last message content if absolutely necessary?
-      // For now, just warn.
-  }
-
-
-  return prunedMessages;
+    return currentMessages;
 }
 
+// --- Deprecate or update pruneMessageHistory ---
+// Keep the old one for now, but ideally replace its usage with ensureContextFits
 /**
- * Estimates token count for a single message (ignoring image tokens).
- * @param {Object} message - Message object with role and content.
- * @returns {Number} - Estimated token count.
+ * Prunes message history based on estimated token count using a simple heuristic.
+ * DEPRECATED: Use ensureContextFits with tiktoken for better accuracy.
+ * @param {Array<object>} messages - Array of message objects.
+ * @param {string} modelId - The ID of the model being used.
+ * @param {object} modelDefinitions - Object containing model context sizes.
+ * @returns {Array<object>} The pruned array of messages.
  */
-function estimateTokenCount(message) {
-  if (!message) return 0;
+ function pruneMessageHistory(messages, modelId, modelDefinitions = {}) {
+    console.warn("DEPRECATED: pruneMessageHistory called. Use ensureContextFits instead.");
+    const modelInfo = modelDefinitions[modelId] || modelDefinitions['default'] || { context: 8192 };
+    const maxTokens = modelInfo.context;
+    const buffer = 500; // Keep a buffer for response generation and system prompt
+    let currentTokenEstimate = 0;
+    const pruned = [];
 
-  let tokenCount = 0;
-  let textContent = '';
+    // Very rough estimate: average chars per token (adjust as needed)
+    const charsPerToken = 4;
 
-  // Handle different content structures (string or array)
-  if (typeof message.content === 'string') {
-    textContent = message.content;
-  } else if (Array.isArray(message.content)) {
-    // Sum text content length from text parts
-    textContent = message.content
-      .filter(part => part.type === 'text')
-      .map(part => part.text)
-      .join('\n'); // Join text parts for length calculation
-  }
-  // NOTE: Ignoring non-text/image parts if the array format is extended.
-
-  // Basic approximation: characters / 4
-  if (textContent) {
-    // Add tokens based on character count (e.g., simple approximation)
-    tokenCount += Math.ceil(textContent.length / 4);
-  }
-
-  // Account for tool calls in assistant messages
-  if (message.role === 'assistant' && message.tool_calls && Array.isArray(message.tool_calls)) {
-    message.tool_calls.forEach(toolCall => {
-      // Estimate tokens for the JSON representation of the tool call
-      try {
-          const serializedToolCall = JSON.stringify(toolCall);
-          tokenCount += Math.ceil(serializedToolCall.length / 4);
-      } catch (e) {
-          console.warn("Error serializing tool call for token estimation:", e);
-          tokenCount += 50; // Add arbitrary penalty if serialization fails
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        let messageTokens = 0;
+        // Estimate tokens for the message content (string or array)
+        if (typeof msg.content === 'string') {
+            messageTokens += Math.ceil(msg.content.length / charsPerToken);
+        } else if (Array.isArray(msg.content)) {
+            msg.content.forEach(part => {
+                 if (part.type === 'text') {
+                    messageTokens += Math.ceil((part.text || '').length / charsPerToken);
+                 } else if (part.type === 'image_url') {
+                     // Very rough fixed estimate for image
+                     messageTokens += 100; 
       }
     });
   }
+        // Add some overhead for role, etc.
+        messageTokens += 10; 
 
-  // Account for tool results in tool messages
-  if (message.role === 'tool') {
-      // Estimate tokens for the (potentially stringified) content of the tool result
-      const contentString = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
-      tokenCount += Math.ceil(contentString.length / 4);
-      // Add a small overhead for the tool role/id itself
-      tokenCount += 10; // Rough estimate for tool_call_id, role etc.
-  }
-
-  // Add a small base token count per message for metadata (role, etc.)
-  tokenCount += 5; // Arbitrary small number
-
-  // NOTE: Image token cost is currently ignored in this estimation.
-  // A more accurate approach would require model-specific tokenization or heuristics.
-
-  return tokenCount;
+        if (currentTokenEstimate + messageTokens <= maxTokens - buffer) {
+            pruned.unshift(msg); // Add message to the beginning of the pruned list
+            currentTokenEstimate += messageTokens;
+        } else {
+            // Stop adding messages once the limit is reached
+            console.log(`Pruning history: Estimated ${currentTokenEstimate} tokens. Max: ${maxTokens - buffer}. Stopping at index ${i}.`);
+            break;
+        }
+    }
+    return pruned;
 }
+
 
 module.exports = {
-    pruneMessageHistory,
-    estimateTokenCount
-}; 
+    countTokens,
+    countTokensForMessages,
+    ensureContextFits,
+    pruneMessageHistory // Keep exporting old one for now
+};

@@ -38,7 +38,15 @@ const MODEL_CONTEXT_SIZES = {
   "deepseek-r1-distill-llama-70b": {
     context: 128000,
     vision_supported: false,
-  }
+  },
+  "llama-3.2-90b-vision-preview": {
+    context: 128000,
+    vision_supported: true,
+  },
+  "llama-3.2-11b-vision-preview": {
+    context: 128000,
+    vision_supported: true,
+  },
 };
 
 module.exports = { MODEL_CONTEXT_SIZES };
