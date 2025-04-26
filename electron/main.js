@@ -259,7 +259,9 @@ app.whenReady().then(async () => {
   ipcMain.on('chat-stream', async (event, messages, model) => {
     const currentSettings = loadSettings(); // Get current settings from settingsManager
     const { discoveredTools } = getMcpState(); // Get current tools from mcpManager
-    chatHandler.handleChatStream(event, messages, model, currentSettings, platformModels, discoveredTools);
+    // Pass the selected platform from settings to the handler
+    const selectedPlatform = currentSettings.selectedPlatform || 'groq'; // Default to groq if not set
+    chatHandler.handleChatStream(event, messages, model, currentSettings, platformModels, discoveredTools, selectedPlatform);
   });
 
   // Handler for executing tool calls - uses toolHandler
@@ -269,22 +271,34 @@ app.whenReady().then(async () => {
   });
 
   // Handler for getting model configurations
-  ipcMain.handle('get-model-configs', async () => {
-      // Return models for the currently selected platform
-      const currentSettings = loadSettings();
-      const selectedPlatform = currentSettings.selectedPlatform || 'groq'; // Default to groq
+  ipcMain.handle('get-model-configs', async (event, platformHint = null) => {
+      // Determine which platform's models to return
+      let selectedPlatform;
+      if (platformHint && (platformHint === 'groq' || platformHint === 'openrouter')) {
+          console.log(`get-model-configs: Using provided platform hint: ${platformHint}`);
+          selectedPlatform = platformHint;
+      } else {
+          const currentSettings = loadSettings();
+          selectedPlatform = currentSettings.selectedPlatform || 'groq'; // Default to groq if not set
+          console.log(`get-model-configs: Using platform from settings: ${selectedPlatform}`);
+      }
+
       const modelsToReturn = platformModels[selectedPlatform] || {};
 
       // If no models are loaded for the selected platform, try fetching them now
-      // (This handles cases where the key might have been added after initial load)
+      // (This handles cases where the key might have been added after initial load or if hint is used before initial fetch completes)
       if (Object.keys(modelsToReturn).length === 0) {
           console.log(`No models found for ${selectedPlatform}, attempting fetch...`);
+          const currentSettings = loadSettings(); // Need settings again for API keys
           if (selectedPlatform === 'groq' && currentSettings.groqApiKey) {
               platformModels.groq = await fetchGroqModels(currentSettings.groqApiKey);
               return platformModels.groq;
           } else if (selectedPlatform === 'openrouter' && currentSettings.openrouterApiKey) {
               platformModels.openrouter = await fetchOpenRouterModels(currentSettings.openrouterApiKey);
               return platformModels.openrouter;
+          } else {
+               console.warn(`Cannot fetch models for ${selectedPlatform}: API key might be missing.`);
+               return {}; // Return empty if fetch isn't possible
           }
       }
 
@@ -339,9 +353,10 @@ app.whenReady().then(async () => {
   // --- Task 3: Save Chat Handler ---
   ipcMain.handle('save-chat', async (event, chatData) => {
     console.log(`IPC Handler: save-chat invoked for ID: ${chatData?.id || 'new'}`);
-    if (!chatData || typeof chatData !== 'object' || !chatData.messages) {
-        console.error("save-chat: Invalid chatData received.");
-        return { success: false, error: "Invalid chat data received" };
+    // Validate required fields from frontend (messages, platform, model)
+    if (!chatData || typeof chatData !== 'object' || !chatData.messages || !chatData.platform || !chatData.model) {
+        console.error("save-chat: Invalid chatData received. Missing messages, platform, or model.", chatData);
+        return { success: false, error: "Invalid chat data received (missing required fields)" };
     }
 
     const chatId = chatData.id || uuidv4(); // Use existing ID or generate a new one
@@ -349,10 +364,14 @@ app.whenReady().then(async () => {
     const now = new Date().toISOString();
 
     const dataToSave = {
+        // Spread all properties sent from frontend, ensuring we capture platform/model
         ...chatData,
         id: chatId, // Ensure the ID is set/updated
         lastModified: now,
         createdAt: chatData.createdAt || now, // Set createdAt only if it doesn't exist
+        // Explicitly ensure platform and model are saved (though covered by spread)
+        platform: chatData.platform,
+        model: chatData.model
     };
 
     // Basic title generation if missing (can be improved later)
@@ -365,7 +384,6 @@ app.whenReady().then(async () => {
         }
         console.log(`Generated title for chat ${chatId}: ${dataToSave.title}`);
     }
-
 
     try {
       await fs.promises.writeFile(chatFilePath, JSON.stringify(dataToSave, null, 2), 'utf-8');

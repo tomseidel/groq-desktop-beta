@@ -1,90 +1,63 @@
-const { net } = require('electron'); // Import net
-const { pruneMessageHistory } = require('./messageUtils'); // Import pruning logic
-
-// Helper to parse Server-Sent Events (SSE) stream chunks
-function parseSSEChunk(chunkStr) {
-    const lines = chunkStr.split('\\n').filter(line => line.trim() !== '');
-    const events = [];
-    for (const line of lines) {
-        if (line.startsWith('data: ')) {
-            const dataContent = line.substring(6).trim();
-            if (dataContent === '[DONE]') {
-                events.push({ type: 'done' });
-            } else {
-                try {
-                    events.push({ type: 'data', payload: JSON.parse(dataContent) });
-                } catch (error) {
-                    console.error('Error parsing SSE JSON:', error, 'Data:', dataContent);
-                    events.push({ type: 'error', error: 'Failed to parse stream data' });
-                }
-            }
-        }
-        // Ignore other lines like 'event:', 'id:', etc. for now
-    }
-    return events;
-}
+const https = require('https'); // Use standard HTTPS module
+const { pruneMessageHistory } = require('./messageUtils');
 
 /**
- * Handles the 'chat-stream' IPC event for streaming chat completions.
- * Now supports dynamic platform selection (Groq/OpenRouter).
+ * Handles the 'chat-stream' IPC event for streaming chat completions using OpenAI-compatible APIs.
  *
  * @param {Electron.IpcMainEvent} event - The IPC event object.
  * @param {Array<object>} messages - The array of message objects for the chat history.
  * @param {string} model - The specific model requested for this completion.
- * @param {object} settings - The current application settings (including selectedPlatform, API keys).
+ * @param {object} settings - The current application settings (needs groqApiKey, openrouterApiKey, selectedPlatform, etc.).
  * @param {object} platformModels - Object containing fetched models for each platform { groq: {...}, openrouter: {...} }.
  * @param {Array<object>} discoveredTools - List of available MCP tools.
+ * @param {string} selectedPlatform - The selected platform ('groq' or 'openrouter'). Passed explicitly.
  */
-async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools) {
-    console.log(`Handling chat-stream request. Platform: ${settings.selectedPlatform}, Model: ${model || 'using settings'}, Messages: ${messages?.length}`);
-
-    let apiKey = '';
-    let apiHostname = '';
-    let apiPath = '';
-    const platform = settings.selectedPlatform || 'groq'; // Default to groq
-
-    // --- 1. Determine API details based on platform ---
-    if (platform === 'groq') {
-        apiKey = settings.groqApiKey;
-        apiHostname = 'api.groq.com';
-        apiPath = '/openai/v1/chat/completions';
-        if (!apiKey || apiKey === "<replace me>") {
-            event.sender.send('chat-stream-error', { error: "API key not configured for Groq. Please add your Groq API key in settings." });
-            return;
-        }
-    } else if (platform === 'openrouter') {
-        apiKey = settings.openrouterApiKey;
-        apiHostname = 'openrouter.ai';
-        apiPath = '/api/v1/chat/completions';
-         if (!apiKey || apiKey === "<replace me>") {
-            event.sender.send('chat-stream-error', { error: "API key not configured for OpenRouter. Please add your OpenRouter API key in settings." });
-            return;
-        }
-    } else {
-        event.sender.send('chat-stream-error', { error: `Unsupported platform selected: ${platform}` });
-        return;
-    }
+async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools, selectedPlatform) {
+    // Assume selectedPlatform is passed in now, along with settings containing relevant API keys.
+    console.log(`Handling chat-stream request. Platform: ${selectedPlatform}, Model: ${model || 'using settings'}, Messages: ${messages?.length}`);
 
     try {
-        // --- 2. Determine model and capabilities ---
-        const modelsForPlatform = platformModels[platform] || {};
-        const modelToUse = model || settings.model || Object.keys(modelsForPlatform)[0]; // Use specified, setting, or first available for platform
+        let apiKey;
+        let apiHostname;
+        let apiPath;
 
-        if (!modelToUse) {
-             event.sender.send('chat-stream-error', { error: `No models available or configured for the selected platform (${platform}). Please check settings or wait for models to load.` });
+        // --- Platform Specific Configuration ---
+        if (selectedPlatform === 'groq') {
+            apiKey = settings.groqApiKey; // Use the key name from the new main.js
+            apiHostname = 'api.groq.com';
+            apiPath = '/openai/v1/chat/completions';
+            if (!apiKey || apiKey === "<replace me>") { // Adjust key check if necessary
+                event.sender.send('chat-stream-error', { error: "API key not configured for Groq. Please add your Groq API key in settings." });
+                return;
+            }
+            console.log("Configured for Groq (OpenAI Compatible Endpoint)");
+        } else if (selectedPlatform === 'openrouter') {
+            apiKey = settings.openrouterApiKey;
+            apiHostname = 'openrouter.ai';
+            apiPath = '/api/v1/chat/completions';
+            if (!apiKey) {
+                event.sender.send('chat-stream-error', { error: "API key not configured for OpenRouter. Please add your OpenRouter API key in settings." });
+                return;
+            }
+            console.log("Configured for OpenRouter");
+        } else {
+            event.sender.send('chat-stream-error', { error: `Unsupported platform selected: ${selectedPlatform || 'none'}` });
             return;
         }
+        // --- End Platform Specific Configuration ---
 
-        // --- Fallback model info structure ---
-        const fallbackDefaultModelInfo = { context: 8192, vision_supported: false };
+        // Get models for the selected platform
+        const modelsForPlatform = platformModels[selectedPlatform] || {};
 
-        // Determine model info, using platform default or absolute default
-        const platformDefaultInfo = platformModels['default'] || fallbackDefaultModelInfo;
-        const modelInfo = modelsForPlatform[modelToUse] || platformDefaultInfo;
+        // Determine model to use: prioritise argument, then settings, then fallback based on platform
+        const defaultModel = selectedPlatform === 'groq' ? 'llama3-70b-8192' : 'openai/gpt-4o'; // Example defaults
+        const modelToUse = model || settings.model || defaultModel; // Note: settings.model might need platform prefix?
 
-        console.log(`Using model: ${modelToUse} on ${platform} (Context: ${modelInfo.context}, Vision: ${modelInfo.vision_supported})`);
+        // Get specific model info from the fetched models
+        const modelInfo = modelsForPlatform[modelToUse] || { id: modelToUse, name: modelToUse, context: 8192, vision_supported: false }; // Basic fallback if model not found
+        console.log(`Using model: ${modelToUse} (Context: ${modelInfo.context}, Vision: ${modelInfo.vision_supported})`);
 
-        // --- 3. Check Vision Support ---
+        // Check for vision support if images are present (using fetched model info)
         const hasImages = messages.some(msg =>
             msg.role === 'user' &&
             Array.isArray(msg.content) &&
@@ -92,99 +65,111 @@ async function handleChatStream(event, messages, model, settings, platformModels
         );
 
         if (hasImages && !modelInfo.vision_supported) {
-            console.warn(`Attempting to use images with non-vision model: ${modelToUse} on ${platform}`);
-            event.sender.send('chat-stream-error', { error: `The selected model (${modelToUse}) on ${platform} does not support image inputs.` });
+            console.warn(`Attempting to use images with non-vision model: ${modelToUse}`);
+            event.sender.send('chat-stream-error', { error: `The selected model (${modelToUse}) does not support image inputs. Please select a vision-capable model.` });
             return;
         }
 
-        // --- 4. Prepare Tools ---
+        // --- Removed Groq SDK Initialization ---
+
+        // Prepare tools for the API call (remains largely the same, follows OpenAI format)
         const tools = (discoveredTools || []).map(tool => ({
             type: "function",
             function: {
                 name: tool.name,
                 description: tool.description,
-                parameters: tool.input_schema || {}
+                parameters: tool.input_schema || {} // Ensure parameters is an object
             }
         }));
         console.log(`Prepared ${tools.length} tools for the API call.`);
 
-        // --- 5. Clean and Prepare Messages ---
+        // Clean and prepare messages for the API (remains the same)
         const cleanedMessages = messages.map(msg => {
             const cleanMsg = { ...msg };
             delete cleanMsg.reasoning;
             delete cleanMsg.isStreaming;
             let finalMsg = { ...cleanMsg };
 
+            // Ensure user message content is an array of parts
             if (finalMsg.role === 'user') {
-                 if (typeof finalMsg.content === 'string') {
+                if (typeof finalMsg.content === 'string') {
                     finalMsg.content = [{ type: 'text', text: finalMsg.content }];
-                 } else if (!Array.isArray(finalMsg.content)) {
+                } else if (!Array.isArray(finalMsg.content)) {
                     console.warn('Unexpected user message content format, defaulting:', finalMsg.content);
                     finalMsg.content = [{ type: 'text', text: '' }];
-                 }
-                 // If platform is OpenRouter, ensure image_url parts have media_type if missing
-                 if (platform === 'openrouter') {
-                     finalMsg.content = finalMsg.content.map(part => {
-                         if (part.type === 'image_url' && part.image_url && !part.image_url.media_type) {
-                             // Basic check for common image types in data URI
-                             if (part.image_url.url?.startsWith('data:image/jpeg')) {
-                                 part.image_url.media_type = 'image/jpeg';
-                             } else if (part.image_url.url?.startsWith('data:image/png')) {
-                                 part.image_url.media_type = 'image/png';
-                             } else if (part.image_url.url?.startsWith('data:image/gif')) {
-                                  part.image_url.media_type = 'image/gif';
-                             } else if (part.image_url.url?.startsWith('data:image/webp')) {
-                                 part.image_url.media_type = 'image/webp';
-                             } else {
-                                 console.warn('Missing media_type for image_url on OpenRouter, attempting default jpeg', part.image_url.url?.substring(0, 50));
-                                 part.image_url.media_type = 'image/jpeg'; // Default or raise error?
-                             }
-                         }
-                         return { type: part.type || 'text', ...part };
-                     });
-                 } else {
-                      finalMsg.content = finalMsg.content.map(part => ({ type: part.type || 'text', ...part }));
-                 }
+                }
+                 // Ensure all parts have a type and handle image URLs correctly
+                 finalMsg.content = finalMsg.content.map(part => {
+                    if (part.type === 'image_url' && part.image_url && typeof part.image_url === 'string') {
+                        // If image_url is just a string, wrap it in the required object structure
+                        console.warn("Correcting image_url format for OpenAI compatibility.");
+                        return { type: 'image_url', image_url: { url: part.image_url } };
+                    }
+                    // Add media_type for OpenRouter if needed (heuristic based example)
+                    if (selectedPlatform === 'openrouter' && part.type === 'image_url' && part.image_url && !part.image_url.media_type) {
+                        // Basic check based on common base64 prefix or file extension
+                        const url = part.image_url.url;
+                        if (url && typeof url === 'string') {
+                            if (url.startsWith('data:image/jpeg')) part.image_url.media_type = 'image/jpeg';
+                            else if (url.startsWith('data:image/png')) part.image_url.media_type = 'image/png';
+                            else if (url.startsWith('data:image/gif')) part.image_url.media_type = 'image/gif';
+                            else if (url.startsWith('data:image/webp')) part.image_url.media_type = 'image/webp';
+                            else console.warn("Could not determine media_type for OpenRouter image URL");
+                        }
+                    }
+                    return { type: part.type || 'text', ...part };
+                });
+            }
 
-            } else if (finalMsg.role === 'assistant') {
-                 if (typeof finalMsg.content !== 'string') {
-                     if (Array.isArray(finalMsg.content)) {
-                         const textContent = finalMsg.content.filter(p => p.type === 'text').map(p => p.text).join('');
-                         finalMsg.content = textContent;
-                     } else {
-                         console.warn('Unexpected assistant message content format, attempting stringify:', finalMsg.content);
-                         try { finalMsg.content = JSON.stringify(finalMsg.content); }
-                         catch { finalMsg.content = '[Non-string content]'; }
-                     }
-                 }
-            } else if (finalMsg.role === 'tool') {
-                if (typeof finalMsg.content !== 'string') {
-                    try { finalMsg.content = JSON.stringify(finalMsg.content); }
-                    catch (e) {
-                        console.warn("Could not stringify tool content:", finalMsg.content, "Error:", e);
-                        finalMsg.content = "[Error stringifying tool content]";
+            // Ensure assistant message content is a string (or null if only tool_calls)
+            if (finalMsg.role === 'assistant') {
+                 if (finalMsg.tool_calls && !finalMsg.content) {
+                    // OpenAI requires content to be null if there are tool calls and no text
+                     finalMsg.content = null;
+                 } else if (typeof finalMsg.content !== 'string') {
+                    if (Array.isArray(finalMsg.content)) {
+                        const textContent = finalMsg.content.filter(p => p.type === 'text').map(p => p.text).join('');
+                        finalMsg.content = textContent || null; // Be null if only non-text parts existed
+                    } else {
+                        console.warn('Unexpected assistant message content format, attempting stringify:', finalMsg.content);
+                        try {
+                            finalMsg.content = JSON.stringify(finalMsg.content);
+                        } catch { finalMsg.content = '[Non-string content]'; }
                     }
                 }
             }
+
+            // Ensure tool message content is stringified if not already
+            if (finalMsg.role === 'tool' && typeof finalMsg.content !== 'string') {
+                try {
+                    finalMsg.content = JSON.stringify(finalMsg.content);
+                } catch (e) {
+                    console.warn("Could not stringify tool content:", finalMsg.content, "Error:", e);
+                    finalMsg.content = "[Error stringifying tool content]";
+                }
+            }
+            // Ensure tool_call_id is present for tool role messages
+            if (finalMsg.role === 'tool' && !finalMsg.tool_call_id) {
+                 console.warn("Tool message missing tool_call_id, adding placeholder:", finalMsg);
+                 finalMsg.tool_call_id = `missing_${Date.now()}`; // Add a placeholder if missing
+            }
+
+
             return finalMsg;
         });
 
-        // --- 6. Prune Message History ---
-        // Pass the specific context size for the selected model
-        const prunedMessages = pruneMessageHistory(cleanedMessages, modelInfo.context || 8192);
-        console.log(`History pruned: ${cleanedMessages.length} -> ${prunedMessages.length} messages using context ${modelInfo.context}.`);
+        // Prune message history (passing model ID and available model info)
+        const prunedMessages = pruneMessageHistory(cleanedMessages, modelToUse, modelsForPlatform);
+        //console.log(`History pruned: ${cleanedMessages.length} -> ${prunedMessages.length} messages.`);
 
-        // --- 7. Construct System Prompt ---
-        let systemPrompt = "You are a helpful assistant. Format responses using Markdown.";
-        if (tools.length > 0) {
-            systemPrompt += " You are capable of using tools. Use tools only when necessary and relevant to the user's request.";
-        }
+        // Construct the system prompt (remains the same)
+        let systemPrompt = "You are a helpful assistant capable of using tools. Use tools only when necessary and relevant to the user's request. Format responses using Markdown.";
         if (settings.customSystemPrompt && settings.customSystemPrompt.trim()) {
-            systemPrompt += `\\n\\n${settings.customSystemPrompt.trim()}`;
+            systemPrompt += `\n\n${settings.customSystemPrompt.trim()}`;
             console.log("Appending custom system prompt.");
         }
 
-        // --- 8. Prepare API Parameters ---
+        // Prepare OpenAI-compatible API parameters
         const apiRequestBody = {
             messages: [
                 { role: "system", content: systemPrompt },
@@ -194,270 +179,244 @@ async function handleChatStream(event, messages, model, settings, platformModels
             temperature: settings.temperature ?? 0.7,
             top_p: settings.top_p ?? 0.95,
             ...(tools.length > 0 && { tools: tools, tool_choice: "auto" }),
-            stream: true
+            stream: true,
+            // Add max_tokens if available in settings?
+             ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
         };
 
-        // Add max_tokens if available in settings
-        if (settings.max_tokens && typeof settings.max_tokens === 'number' && settings.max_tokens > 0) {
-            apiRequestBody.max_tokens = settings.max_tokens;
-            console.log(`Setting max_tokens: ${apiRequestBody.max_tokens}`);
-        } else {
-            console.log(`Using default max_tokens (not set or invalid in settings).`);
-        }
+        // --- Log the request body before sending ---
+        console.log('*** API Request Body Messages: ***\n', JSON.stringify(apiRequestBody.messages, null, 2));
+        // --- End Logging ---
 
-        // --- 9. Setup API Request Headers --- (Moved outside makeRequest for clarity)
-        const requestHeaders = {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-            // OpenRouter specific headers (Optional)
-            ...(platform === 'openrouter' && {
-                'HTTP-Referer': settings.openrouterReferrer || 'https://github.com/YourApp/GroqDesktop', // Use setting or default
-                'X-Title': settings.openrouterTitle || 'Groq Desktop (Modified)' // Use setting or default
-                // Consider making referrer/title configurable in settings.js/Settings.jsx
-            })
-        };
-
-        // --- 10. Streaming and Retry Logic ---
-        let retryCount = 0;
+        // --- Streaming and Retry Logic using HTTPS ---
+        // Note: Retry logic is simplified (removed while loop) due to complexity with callbacks.
+        // Consider implementing Promises for robust retries if needed.
+        let retryCount = 0; // Kept for potential future use / logging
         const MAX_TOOL_USE_RETRIES = 3;
-        let currentRequestAttempt = null; // To manage request cancellation/retry
 
-        const makeRequest = () => {
-            return new Promise((resolve, reject) => {
-                 console.log(`Attempting ${platform} completion (attempt ${retryCount + 1}/${MAX_TOOL_USE_RETRIES + 1})...`);
-
-                let accumulatedContent = "";
-                let accumulatedToolCalls = [];
-                let accumulatedReasoning = null;
-                let isFirstChunk = true;
-                let streamId = null;
-                let finishReason = null;
-                let responseStatusCode = null;
-                let unprocessedChunkData = ""; // Buffer for partial SSE chunks
-
-                currentRequestAttempt = net.request({
-                    method: 'POST',
-                    protocol: 'https:',
-                    hostname: apiHostname,
-                    path: apiPath,
-                    headers: requestHeaders // Use defined headers
-                });
-
-                currentRequestAttempt.on('response', (response) => {
-                    responseStatusCode = response.statusCode;
-                    console.log(`${platform} API response status: ${responseStatusCode}`);
-
-                    if (responseStatusCode !== 200) {
-                         let errorBody = '';
-                         response.on('data', (chunk) => errorBody += chunk.toString());
-                         response.on('end', () => {
-                              console.error(`Error from ${platform} API: Status ${responseStatusCode}`, 'Body:', errorBody);
-                              // Try to parse error details from body if JSON
-                              let detailMessage = errorBody.substring(0, 200);
-                              try {
-                                  const errorJson = JSON.parse(errorBody);
-                                  if (errorJson.error?.message) {
-                                      detailMessage = errorJson.error.message;
-                                  }
-                              } catch {}
-                              reject(new Error(`API Error: ${responseStatusCode} - ${detailMessage}`)); // Reject promise on non-200 status
-                         });
-                         return;
-                    }
-
-                    // Handle successful stream
-                    let accumulatedDataForEvent = ''; // Buffer for current event's data lines
-
-                    response.on('data', (chunk) => {
-                        unprocessedChunkData += chunk.toString();
-                        let newlineIndex;
-
-                        // Process line by line
-                        while ((newlineIndex = unprocessedChunkData.indexOf('\n')) !== -1) {
-                            const line = unprocessedChunkData.substring(0, newlineIndex).trim();
-                            unprocessedChunkData = unprocessedChunkData.substring(newlineIndex + 1);
-
-                            if (line === '') { // Empty line marks the end of an event
-                                if (accumulatedDataForEvent) {
-                                    if (accumulatedDataForEvent === '[DONE]') {
-                                        console.log(`Stream finished ([DONE] received). ID: ${streamId}`);
-                                        finishReason = finishReason || 'stop';
-                                        resolve({ content: accumulatedContent, tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined, reasoning: accumulatedReasoning, finish_reason: finishReason });
-                                        accumulatedDataForEvent = ''; // Reset buffer
-                                        // Don't abort here, let 'end' handle it
-                                        return; // Stop processing this chunk
-                                    } else {
-                                        try {
-                                            const payload = JSON.parse(accumulatedDataForEvent);
-                                            accumulatedDataForEvent = ''; // Reset buffer after successful parse
-
-                                            // --- Process Parsed Payload --- //
-                                            if (!payload.choices || !payload.choices.length || !payload.choices[0]) continue;
-
-                                            const choice = payload.choices[0];
-                                            const delta = choice.delta;
-
-                                            if (isFirstChunk && payload.id) {
-                                                streamId = payload.id;
-                                                event.sender.send('chat-stream-start', { id: streamId, role: delta?.role || "assistant" });
-                                                isFirstChunk = false;
-                                            }
-
-                                            if (delta?.content) {
-                                                accumulatedContent += delta.content;
-                                                event.sender.send('chat-stream-content', { content: delta.content });
-                                            }
-
-                                            if (delta?.tool_calls && delta.tool_calls.length > 0) {
-                                                // (Existing tool_calls accumulation logic - slightly adapted)
-                                                for (const toolCallDelta of delta.tool_calls) {
-                                                    let existingCall = accumulatedToolCalls.find(tc => tc.index === toolCallDelta.index);
-                                                    if (!existingCall) {
-                                                        if (toolCallDelta.index !== undefined && toolCallDelta.index !== null) {
-                                                            accumulatedToolCalls.push({
-                                                                index: toolCallDelta.index,
-                                                                id: toolCallDelta.id || `tool_${Date.now()}_${toolCallDelta.index}`,
-                                                                type: toolCallDelta.type || 'function',
-                                                                function: { name: toolCallDelta.function?.name || "", arguments: toolCallDelta.function?.arguments || "" }
-                                                            });
-                                                        } else { console.warn("Received tool_call delta without index:", toolCallDelta); }
-                                                    } else {
-                                                        if (toolCallDelta.function?.arguments) existingCall.function.arguments += toolCallDelta.function.arguments;
-                                                        if (toolCallDelta.function?.name) existingCall.function.name = toolCallDelta.function.name;
-                                                        if (toolCallDelta.id) existingCall.id = toolCallDelta.id;
-                                                    }
-                                                }
-                                                // Send accumulated *completed* tool calls - structure might need review based on how they arrive
-                                                const completedToolCalls = accumulatedToolCalls.filter(tc => tc.id && tc.function.name && tc.function.arguments /* or some end signal? */);
-                                                if (completedToolCalls.length > 0) {
-                                                     event.sender.send('chat-stream-tool-calls', { tool_calls: completedToolCalls });
-                                                }
-                                            }
-
-                                            if (choice.finish_reason) {
-                                                finishReason = choice.finish_reason;
-                                                console.log(`Stream completion indicated in payload. Reason: ${finishReason}, ID: ${streamId}`);
-                                                if (finishReason === 'length') { // Resolve early on length limit
-                                                    resolve({ content: accumulatedContent, tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined, reasoning: accumulatedReasoning, finish_reason: finishReason });
-                                                    return; // Exit handler
-                                                }
-                                            }
-                                            // --- End Process Parsed Payload --- //
-
-                                        } catch (error) {
-                                            console.error('Error parsing accumulated SSE data JSON:', error, 'Data:', accumulatedDataForEvent);
-                                            event.sender.send('chat-stream-error', { error: 'Failed to parse stream data chunk' });
-                                            accumulatedDataForEvent = ''; // Reset buffer even on error
-                                            // Consider rejecting the promise or stopping? For now, log and continue.
-                                        }
-                                    }
-                                } // end if(accumulatedDataForEvent)
-                            } else if (line.startsWith('data:')) {
-                                const dataPart = line.substring(5).trim(); // Get content after 'data: '
-                                accumulatedDataForEvent += dataPart; // Append to buffer
-                                // Note: No newline added here, assumes JSON parser handles concatenated data if needed.
-                                // If multi-line JSON is expected, a newline might be needed: accumulatedDataForEvent += (accumulatedDataForEvent ? '\n' : '') + dataPart;
-                            } else {
-                                // Ignore other lines like id:, event:, : (comment)
-                            }
-                        } // End while loop for processing lines in buffer
-                    }); // End response.on('data')
-
-                    response.on('end', () => {
-                        console.log(`Stream response ended. ID: ${streamId}. Finish Reason: ${finishReason}`);
-                        // If stream ends without [DONE] or explicit finish_reason, resolve with what we have
-                         if (finishReason) {
-                             resolve({
-                                 content: accumulatedContent,
-                                 tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
-                                 reasoning: accumulatedReasoning,
-                                 finish_reason: finishReason
-                             });
-                         } else {
-                             // If stream just ends without a clear signal (unlikely but possible)
-                             console.warn("Stream ended without explicit finish reason or [DONE]. Resolving with current state as 'stop'.");
-                             resolve({
-                                 content: accumulatedContent,
-                                 tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
-                                 reasoning: accumulatedReasoning,
-                                 finish_reason: 'stop' // Assume stop if no other reason given
-                             });
-                         }
-                    });
-
-                    response.on('error', (error) => {
-                        console.error(`Error during ${platform} API stream response:`, error);
-                        reject(error); // Reject promise on response error
-                    });
-                }); // End request.on('response')
-
-                currentRequestAttempt.on('error', (error) => {
-                    // Ignore ECONNRESET if it happens after we already resolved/rejected (e.g., during abort)
-                    if (error.code === 'ECONNRESET' && (finishReason || responseStatusCode !== 200)) {
-                        console.log('Ignoring ECONNRESET after stream completion/error.');
-                        return;
-                    }
-                    console.error(`Error making ${platform} API request:`, error);
-                    reject(error); // Reject promise on request error
-                });
-
-                // Write the request body and end the request
-                currentRequestAttempt.write(JSON.stringify(apiRequestBody));
-                currentRequestAttempt.end();
-            }); // End Promise
-        }; // End makeRequest function
-
-
-        // --- Execution and Retry Loop ---
-        while (retryCount <= MAX_TOOL_USE_RETRIES) {
-            try {
-                const result = await makeRequest(); // Await the promise from makeRequest
-                // If makeRequest resolved successfully, send completion and exit
-                event.sender.send('chat-stream-complete', {
-                    content: result.content,
-                    role: "assistant",
-                    tool_calls: result.tool_calls,
-                    reasoning: result.reasoning,
-                    finish_reason: result.finish_reason
-                });
-                return; // Successful completion
-
-            } catch (error) {
-                // Check if it's a tool_use_failed error (adjust condition if OpenRouter signals differently)
-                const isToolUseFailedError = (
-                    error?.finish_reason === 'tool_calls' || // Example: OpenAI style
-                    error?.message?.includes('tool_use_failed') || // Example: Groq style
-                    (error?.message?.includes('API Error') && (error.message.includes('tool') || error.message.includes('function calling')))
-                    // Add specific OpenRouter error codes/messages if known
-                 ) && finishReason !== 'length'; // Don't retry if it was a length limit issue
-
-                if (isToolUseFailedError && retryCount < MAX_TOOL_USE_RETRIES) {
-                    retryCount++;
-                    console.warn(`Tool use likely failed. Retrying (${retryCount}/${MAX_TOOL_USE_RETRIES})... Error:`, error.message);
-                    // Optional delay? await new Promise(resolve => setTimeout(resolve, 500));
-                    continue; // Retry the while loop
-                }
-
-                // Handle other errors or exhausted retries
-                console.error(`Error during ${platform} stream processing or retries exhausted:`, error);
-                const errorMessage = error instanceof Error ? error.message : String(error);
-                event.sender.send('chat-stream-error', {
-                    error: `Failed to get chat completion from ${platform}: ${errorMessage}`,
-                    // Avoid sending potentially large/complex error objects directly
-                    // details: error
-                });
-                return; // Exit after sending error
+        let requestAborted = false; // Flag to track explicit abort
+        const req = https.request({
+            hostname: apiHostname,
+            path: apiPath,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+                'Accept': 'text/event-stream', // Essential for SSE
+                'Connection': 'keep-alive',
+                // --- Add OpenRouter specific headers if needed ---
+                ...(selectedPlatform === 'openrouter' && {
+                    'HTTP-Referer': settings.openrouterReferrer || 'https://github.com/YourApp/GroqDesktop', // Replace with actual repo/app URL
+                    'X-Title': settings.openrouterTitle || 'Groq Desktop (Electron)' // Replace with actual App Title
+                })
             }
-        } // End while loop
+        }, (res) => {
+            console.log(`API Response Status: ${res.statusCode}`);
 
-        // If retries exhausted
-        if (retryCount > MAX_TOOL_USE_RETRIES) {
-             console.error(`Max retries (${MAX_TOOL_USE_RETRIES}) exceeded for tool_use_failed error on ${platform}.`);
-             event.sender.send('chat-stream-error', { error: `The model repeatedly failed to use tools correctly after ${MAX_TOOL_USE_RETRIES + 1} attempts. Please try rephrasing your request.` });
-         }
+            if (res.statusCode !== 200) {
+                let errorBody = '';
+                res.on('data', (chunk) => errorBody += chunk);
+                res.on('end', () => {
+                    console.error(`API Error (${res.statusCode}):`, errorBody);
+                     // Check for tool use failed error (adjust based on actual API response structure)
+                     // Basic check, may need refinement based on actual error formats from Groq/OpenRouter OpenAI endpoints
+                     const isToolUseFailedError = errorBody.toLowerCase().includes('tool_use_failed') || errorBody.toLowerCase().includes('error running tool');
+
+                     // Simplified: No retry loop active, just report error
+                     // if (isToolUseFailedError && retryCount < MAX_TOOL_USE_RETRIES) {
+                     //    console.warn(`Tool use failed error detected from API response.`);
+                     // }
+                     event.sender.send('chat-stream-error', {
+                         error: `API request failed with status ${res.statusCode}.`,
+                         details: errorBody || `Status: ${res.statusCode}`
+                     });
+                });
+                return; // Stop processing response data for non-200 status
+            }
+
+            res.setEncoding('utf8');
+            let buffer = '';
+            let accumulatedContent = "";
+            let accumulatedToolCalls = [];
+            let accumulatedReasoning = null; // Store reasoning if applicable
+            let isFirstChunk = true;
+            let streamId = `stream_${Date.now()}`; // Generate a simple ID
+
+            res.on('data', (chunk) => {
+                if (requestAborted) return; // Stop processing if already completed or aborted
+                buffer += chunk;
+                // Process buffer line by line for SSE messages
+                let boundary = buffer.indexOf('\n\n');
+                while (boundary !== -1) {
+                    const message = buffer.substring(0, boundary);
+                    buffer = buffer.substring(boundary + 2); // Skip the \n\n
+                    boundary = buffer.indexOf('\n\n');
+
+                    if (message.startsWith('data: ')) {
+                        const dataContent = message.substring(6).trim(); // Skip 'data: '
+                        if (dataContent === '[DONE]') {
+                            // Stream finished signal
+                            console.log(`Stream completed via [DONE]. Reason: ${accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop'}, ID: ${streamId}`);
+                            if (!requestAborted) {
+                                requestAborted = true;
+                                event.sender.send('chat-stream-complete', {
+                                    id: streamId, // Use generated ID
+                                    content: accumulatedContent,
+                                    role: "assistant",
+                                    tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
+                                    reasoning: accumulatedReasoning,
+                                    finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop' // Infer finish reason
+                                });
+                                req.abort(); // Ensure connection closes
+                            }
+                            return; // Stop processing further data chunks
+                        }
+
+                        try {
+                            const jsonChunk = JSON.parse(dataContent);
+
+                            // --- Process OpenAI formatted chunk ---
+                            if (jsonChunk.choices && jsonChunk.choices.length > 0) {
+                                const choice = jsonChunk.choices[0];
+                                const delta = choice.delta;
+
+                                if (isFirstChunk) {
+                                    streamId = jsonChunk.id || streamId; // Capture actual stream ID if available
+                                    event.sender.send('chat-stream-start', {
+                                        id: streamId,
+                                        role: delta?.role || "assistant",
+                                        model: jsonChunk.model // Send model used back
+                                    });
+                                    isFirstChunk = false;
+                                }
+
+                                if (delta?.content) {
+                                    accumulatedContent += delta.content;
+                                    event.sender.send('chat-stream-content', { id: streamId, content: delta.content });
+                                }
+
+                                if (delta?.tool_calls && delta.tool_calls.length > 0) {
+                                    // Reuse existing logic for accumulating tool calls
+                                    for (const toolCallDelta of delta.tool_calls) {
+                                         let existingCall = accumulatedToolCalls.find(tc => tc.index === toolCallDelta.index);
+                                         if (!existingCall && toolCallDelta.index !== undefined) { // Need index to track
+                                             accumulatedToolCalls.push({
+                                                 index: toolCallDelta.index,
+                                                 id: toolCallDelta.id || null, // ID might come later
+                                                 type: toolCallDelta.type || 'function',
+                                                 function: {
+                                                     name: toolCallDelta.function?.name || "",
+                                                     arguments: toolCallDelta.function?.arguments || ""
+                                                 }
+                                             });
+                                             existingCall = accumulatedToolCalls[accumulatedToolCalls.length - 1];
+                                         } else if (existingCall) {
+                                             // Update existing call
+                                             if (toolCallDelta.id) existingCall.id = toolCallDelta.id;
+                                             // Name usually comes all at once, replace is safer than append
+                                             if (toolCallDelta.function?.name) existingCall.function.name = toolCallDelta.function.name;
+                                             if (toolCallDelta.function?.arguments) existingCall.function.arguments += toolCallDelta.function.arguments; // Append arguments
+                                         } else {
+                                             console.warn("Received tool call delta without index or matching existing call:", toolCallDelta);
+                                         }
+                                    }
+                                     // Send update with potentially partial tool calls (remove index before sending)
+                                     const sanitizedToolCalls = accumulatedToolCalls.map(tc => ({ ...tc, index: undefined }));
+                                     event.sender.send('chat-stream-tool-calls', { id: streamId, tool_calls: sanitizedToolCalls });
+                                }
+
+                                if (choice.finish_reason) {
+                                    console.log(`Stream completed via finish_reason. Reason: ${choice.finish_reason}, ID: ${streamId}`);
+                                    if (!requestAborted) {
+                                        requestAborted = true;
+                                        // Map Groq finish reasons if needed, e.g., 'tool_calls' might come from Groq
+                                        const finalFinishReason = choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason;
+
+                                        // Ensure final tool call IDs are captured if they arrive with finish reason
+                                         if (delta?.tool_calls) {
+                                             // Process potential final updates to tool calls here if needed (e.g., ensure IDs are set)
+                                             delta.tool_calls.forEach(finalDelta => {
+                                                const call = accumulatedToolCalls.find(tc => tc.index === finalDelta.index);
+                                                if(call && finalDelta.id) call.id = finalDelta.id;
+                                             });
+                                         }
+                                         const finalSanitizedToolCalls = accumulatedToolCalls.map(tc => ({ ...tc, index: undefined }));
+
+                                        event.sender.send('chat-stream-complete', {
+                                            id: streamId,
+                                            content: accumulatedContent,
+                                            role: "assistant",
+                                            tool_calls: finalSanitizedToolCalls.length > 0 ? finalSanitizedToolCalls : undefined,
+                                            reasoning: accumulatedReasoning,
+                                            finish_reason: finalFinishReason
+                                        });
+                                        req.abort(); // Ensure connection closes
+                                    }
+                                    return; // Stop processing
+                                }
+                            }
+                            // --- End Process OpenAI formatted chunk ---
+
+                        } catch (parseError) {
+                            console.error('Error parsing SSE data chunk:', parseError, 'Data:', dataContent);
+                            // Decide if this is fatal or ignorable noise
+                        }
+                    }
+                } // end while loop for processing buffer
+            }); // end res.on('data')
+
+            res.on('end', () => {
+                if (!requestAborted) { // Check if already completed via [DONE] or finish_reason
+                     console.warn('Stream ended unexpectedly without [DONE] message or finish_reason.');
+                     requestAborted = true;
+                     // Send completion with whatever was accumulated, maybe with 'length' finish reason?
+                     event.sender.send('chat-stream-complete', {
+                          id: streamId,
+                          content: accumulatedContent,
+                          role: "assistant",
+                          tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
+                          reasoning: accumulatedReasoning,
+                          finish_reason: 'length' // Indicate truncation or unexpected end
+                      });
+                }
+            });
+
+            res.on('error', (socketError) => {
+                console.error('Error during HTTPS response streaming:', socketError);
+                if (!requestAborted) {
+                    requestAborted = true;
+                    event.sender.send('chat-stream-error', { error: `Network error during stream: ${socketError.message}` });
+                }
+            });
+        }); // end https.request callback
+
+        req.on('error', (requestError) => {
+            console.error('Error making HTTPS request:', requestError);
+            if (!requestAborted) {
+                 requestAborted = true;
+                 // Handle specific errors like DNS resolution, connection refused etc.
+                 const commonMessages = {
+                     'ENOTFOUND': `Could not resolve hostname ${apiHostname}. Check network connection or API endpoint.`,
+                     'ECONNREFUSED': `Connection refused by ${apiHostname}. Ensure the API server is running and accessible.`,
+                     'ETIMEDOUT': 'Connection timed out.',
+                 };
+                 const errorMessage = commonMessages[requestError.code] || `Request failed: ${requestError.message}`;
+
+                 event.sender.send('chat-stream-error', { error: errorMessage });
+            }
+        });
+
+        // Write the request body and end the request
+        req.write(JSON.stringify(apiRequestBody));
+        req.end();
+
+        // --- Handle Abort from Renderer ---
+        // Need a mechanism for the renderer to signal aborting the stream
+        // Example: ipcMain.on('chat-stream-abort', (event, streamIdToAbort) => { ... req.abort() ... });
+        // For now, no explicit abort handler is implemented here.
 
     } catch (outerError) {
-        // Catch errors during setup (e.g., model lookup, message prep)
+        // Catch errors during setup (e.g., message prep, initial checks)
         console.error('Error setting up chat completion stream:', outerError);
         event.sender.send('chat-stream-error', { error: `Setup error: ${outerError.message}` });
     }
