@@ -98,7 +98,7 @@ async function handleExecuteToolCall(event, toolCall, discoveredTools, mcpClient
        }
 
       return {
-        result: limitContentLength(resultString), // Limit length *after* stringifying
+        result: resultString, // Limit length *after* stringifying
         tool_call_id: toolCallId
       };
     } catch (executionError) {

@@ -6,6 +6,9 @@ function ToolCall({ toolCall, toolResult }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [parsedArgs, setParsedArgs] = useState(null);
+  const [parseErrorArgs, setParseErrorArgs] = useState(null);
+  const [parseErrorMessage, setParseErrorMessage] = useState(null);
 
   useEffect(() => {
     setResult(null);
@@ -25,6 +28,23 @@ function ToolCall({ toolCall, toolResult }) {
     }
   }, [toolResult]);
 
+  useEffect(() => {
+    setParsedArgs(null);
+    setParseErrorArgs(null);
+    setParseErrorMessage(null);
+    if (toolCall?.function?.arguments) {
+      try {
+        setParsedArgs(JSON.parse(toolCall.function.arguments));
+      } catch (e) {
+        console.warn("Failed to parse tool call arguments JSON:", toolCall.function.arguments, e);
+        setParseErrorArgs(toolCall.function.arguments);
+        setParseErrorMessage(e.message);
+      }
+    } else {
+      setParsedArgs({});
+    }
+  }, [toolCall?.function?.arguments]);
+
   const formatFunctionName = (name) => {
     if (!name) return '';
     
@@ -41,13 +61,6 @@ function ToolCall({ toolCall, toolResult }) {
   const { function: func } = toolCall;
   const functionName = func.name;
   const formattedName = formatFunctionName(functionName);
-  let args = {};
-  try {
-    args = JSON.parse(func.arguments || '{}');
-  } catch (e) {
-    console.error("Failed to parse tool call arguments:", func.arguments, e);
-    args = { parse_error: "Could not parse arguments", original_arguments: func.arguments };
-  }
 
   const isPending = toolResult === null || toolResult === undefined;
 
@@ -88,7 +101,7 @@ function ToolCall({ toolCall, toolResult }) {
             <div className="text-sm font-medium text-gray-400 mb-1">Arguments:</div>
             <div className="rounded-md text-sm overflow-x-auto">
               <SyntaxHighlighter 
-                language="json" 
+                language={parseErrorArgs ? "text" : "json"}
                 style={vscDarkPlus}
                 customStyle={{
                   borderRadius: '0.375rem', 
@@ -99,7 +112,10 @@ function ToolCall({ toolCall, toolResult }) {
                 }}
                 wrapLongLines={true}
               >
-                {JSON.stringify(args, null, 2)}
+                {parseErrorArgs !== null 
+                  ? `// JSON Parse Error: ${parseErrorMessage}\n// Raw Arguments:\n${parseErrorArgs}` 
+                  : JSON.stringify(parsedArgs, null, 2)
+                }
               </SyntaxHighlighter>
             </div>
 

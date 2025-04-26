@@ -67,7 +67,8 @@ function App() {
   // const [messages, setMessages] = useState([]); // Remove local state
   const { messages, setMessages } = useChat(); // Use context state
   const [loading, setLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('llama-3.3-70b-versatile');
+  const [selectedPlatform, setSelectedPlatform] = useState('groq'); // 'groq' or 'openrouter'
+  const [selectedModel, setSelectedModel] = useState(''); // Model ID for the selected platform
   const [mcpTools, setMcpTools] = useState([]);
   const [isToolsPanelOpen, setIsToolsPanelOpen] = useState(false);
   const [mcpServersStatus, setMcpServersStatus] = useState({ loading: false, message: "" });
@@ -75,12 +76,15 @@ function App() {
   // Store the list of models from capabilities keys
   // const models = Object.keys(MODEL_CONTEXT_SIZES).filter(key => key !== 'default'); // Old way
   const [modelConfigs, setModelConfigs] = useState({}); // State for model configurations
-  const [models, setModels] = useState([]); // State for model list
+  const [models, setModels] = useState([]); // State for model list (now platform-specific)
 
   // State for current model's vision capability
-  const [visionSupported, setVisionSupported] = useState(false);
+  // const [visionSupported, setVisionSupported] = useState(false); // REMOVED STATE
   // Add state to track if initial model/settings load is complete
   const [initialLoadComplete, setInitialLoadComplete] = useState(false);
+
+  // State to hold all fetched model configs (key = platform, value = { modelId: config })
+  const [allPlatformModels, setAllPlatformModels] = useState({ groq: {}, openrouter: {} });
 
   // --- State for Tool Approval Flow ---
   const [pendingApprovalCall, setPendingApprovalCall] = useState(null); // Holds the tool call object needing approval
@@ -105,6 +109,45 @@ function App() {
     setPausedChatState(null); // Clear any paused state
     setLoading(false); // Ensure loading indicator is off
     console.log("Chat cleared.");
+  };
+
+  // --- Function to load models for a specific platform ---
+  const loadModelsForPlatform = async (platform) => {
+      setLoading(true);
+      console.log(`Requesting models for platform: ${platform}`);
+      try {
+          const platformConfigs = await window.electron.getModelConfigs(); // This now returns models for the *currently selected* platform in backend settings
+          console.log(`Received ${Object.keys(platformConfigs).length} models for ${platform}:`, platformConfigs);
+
+          // Store these models under the specific platform key
+          setAllPlatformModels(prev => ({ ...prev, [platform]: platformConfigs }));
+
+          const availableModels = Object.keys(platformConfigs).filter(key => key !== 'default');
+          setModels(availableModels); // Update UI dropdown list
+
+          // Set a default model if the list isn't empty
+          if (availableModels.length > 0) {
+              // Try to use the globally saved model setting first, if it exists in this platform's list
+              const settings = await window.electron.getSettings();
+              const savedModel = settings.model;
+              if (savedModel && platformConfigs[savedModel]) {
+                  setSelectedModel(savedModel);
+              } else {
+                   // Otherwise, default to the first model in the new list
+                   setSelectedModel(availableModels[0]);
+              }
+          } else {
+              setSelectedModel(''); // No models available
+          }
+
+      } catch (error) {
+          console.error(`Error loading models for platform ${platform}:`, error);
+          setModels([]);
+          setSelectedModel('');
+          // Optionally show an error message to the user
+      } finally {
+          setLoading(false);
+      }
   };
 
   // Function to update the server status display - moved outside useEffect
@@ -163,31 +206,52 @@ function App() {
         // Set loading status
         setMcpServersStatus({ loading: true, message: "Connecting to MCP servers..." });
 
-        // Load model configurations first
-        const configs = await window.electron.getModelConfigs(); // Await configs
-        setModelConfigs(configs);
-        const availableModels = Object.keys(configs).filter(key => key !== 'default');
-        setModels(availableModels); // Set models list
+        // --- Load settings first to know the platform ---
+        const settings = await window.electron.getSettings(); // Await settings
+        const initialPlatform = settings.selectedPlatform || 'groq';
+        setSelectedPlatform(initialPlatform);
+
+        console.log(`Initial platform from settings: ${initialPlatform}`);
+
+        // --- Load models for the initial platform ---
+        // We need to ensure getModelConfigs reflects the loaded platform setting
+        // The backend get-model-configs handler should now use settings.selectedPlatform
+        await loadModelsForPlatform(initialPlatform);
+
+        // Note: selectedModel is set within loadModelsForPlatform
+
+        // --- Legacy: Original Settings/Model loading logic (kept for reference, mostly replaced) ---
+        // let effectiveModel = models.length > 0 ? models[0] : ''; // Default based on newly loaded models
+        // if (settings && settings.model) {
+        //     // Check if the saved model is valid for the *initial* platform
+        //     const initialPlatformModels = allPlatformModels[initialPlatform] || {};
+        //     if (initialPlatformModels[settings.model]) {
+        //         effectiveModel = settings.model;
+        //     } else {
+        //         console.warn(`Saved model "${settings.model}" not found for initial platform ${initialPlatform}. Falling back to ${effectiveModel}.`);
+        //     }
+        // }
+        // setSelectedModel(effectiveModel);
 
         // THEN Load settings
-        const settings = await window.electron.getSettings(); // Await settings
-        let effectiveModel = availableModels.length > 0 ? availableModels[0] : 'default'; // Default fallback if no models or no setting
+        // const settings = await window.electron.getSettings(); // Await settings
+        // let effectiveModel = availableModels.length > 0 ? availableModels[0] : 'default'; // Default fallback if no models or no setting
 
-        if (settings && settings.model) {
-            // Ensure the saved model is still valid against the loaded configs
-            if (configs[settings.model]) {
-                effectiveModel = settings.model; // Use saved model if valid
-            } else {
-                // If saved model is invalid, keep the default fallback (first available model)
-                console.warn(`Saved model "${settings.model}" not found in loaded configs. Falling back to ${effectiveModel}.`);
-            }
-        } else if (availableModels.length > 0) {
-             // If no model saved in settings, but models are available, use the first one
-             effectiveModel = availableModels[0];
-        }
-        // If no model in settings and no available models, effectiveModel remains 'default'
+        // if (settings && settings.model) {
+        //     // Ensure the saved model is still valid against the loaded configs
+        //     if (configs[settings.model]) {
+        //         effectiveModel = settings.model; // Use saved model if valid
+        //     } else {
+        //         // If saved model is invalid, keep the default fallback (first available model)
+        //         console.warn(`Saved model "${settings.model}" not found in loaded configs. Falling back to ${effectiveModel}.`);
+        //     }
+        // } else if (availableModels.length > 0) {
+        //      // If no model saved in settings, but models are available, use the first one
+        //      effectiveModel = availableModels[0];
+        // }
+        // // If no model in settings and no available models, effectiveModel remains 'default'
 
-        setSelectedModel(effectiveModel); // Set the final selected model state
+        // setSelectedModel(effectiveModel); // Set the final selected model state
 
 
         // Initial load of MCP tools (can happen after model/settings)
@@ -239,9 +303,10 @@ function App() {
         return;
     }
 
-    // Also ensure models list isn't empty and selectedModel is valid
-    if (models.length === 0 || !selectedModel) {
-        console.warn("Skipping model save: Models not loaded or no model selected.");
+    // Ensure models list isn't empty and selectedModel is valid for the CURRENT platform
+    const currentPlatformModels = allPlatformModels[selectedPlatform] || {};
+    if (Object.keys(currentPlatformModels).length === 0 || !selectedModel || !currentPlatformModels[selectedModel]) {
+        console.warn("Skipping model save: Models not loaded for current platform or no valid model selected.");
         return;
     }
 
@@ -263,7 +328,7 @@ function App() {
 
     saveModelSelection();
     // Depend on initialLoadComplete as well to trigger after load finishes
-  }, [selectedModel, initialLoadComplete, models]);
+  }, [selectedModel, initialLoadComplete, selectedPlatform, allPlatformModels]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -276,7 +341,7 @@ function App() {
   const executeToolCall = async (toolCall) => {
     try {
       const response = await window.electron.executeToolCall(toolCall);
-      
+      console.log(`Tool call response: ${JSON.stringify(response)}`);
       // Return the tool response message in the correct format
       return {
         role: 'tool',
@@ -342,17 +407,6 @@ function App() {
       return { status: 'completed', toolResponseMessages };
     }
   };
-
-  // Update vision support when selectedModel or modelConfigs changes
-  useEffect(() => {
-    if (modelConfigs && selectedModel && modelConfigs[selectedModel]) {
-      const capabilities = modelConfigs[selectedModel] || modelConfigs['default'];
-      setVisionSupported(capabilities.vision_supported);
-    } else {
-      // Handle case where configs aren't loaded yet or model is invalid
-      setVisionSupported(false);
-    }
-  }, [selectedModel, modelConfigs]);
 
   // Core function to execute a chat turn (fetch response, handle tools)
   // Refactored from the main loop of handleSendMessage
@@ -502,6 +556,29 @@ function App() {
         assistantMessage: turnAssistantMessage,
         toolResponseMessages: turnToolResponses,
     };
+  };
+
+  // --- Handle Platform Change --- //
+  const handlePlatformChange = async (newPlatform) => {
+    if (newPlatform === selectedPlatform) return; // No change
+
+    console.log(`Switching platform to: ${newPlatform}`);
+    setSelectedPlatform(newPlatform);
+    setModels([]); // Clear current model list
+    setSelectedModel(''); // Clear selected model
+    // setVisionSupported(false); // REMOVED
+
+    // Save the new platform selection to settings
+    try {
+      const settings = await window.electron.getSettings();
+      await window.electron.saveSettings({ ...settings, selectedPlatform: newPlatform });
+    } catch (error) {
+      console.error('Error saving platform selection:', error);
+      // Handle error - maybe revert UI or show message?
+    }
+
+    // Load models for the new platform
+    await loadModelsForPlatform(newPlatform);
   };
 
   // Handle sending message (text or structured content with images)
@@ -817,6 +894,10 @@ function App() {
       setMcpServersStatus({ loading: false, message: "Error refreshing MCP tools" });
     }
   };
+
+  // --- Calculate derived state --- //
+  const isVisionSupported = allPlatformModels[selectedPlatform]?.[selectedModel]?.vision_supported || false;
+
   return (
     <div className="flex flex-col h-screen">
       <header className="bg-user-message-bg shadow">
@@ -836,6 +917,18 @@ function App() {
                 {models.map(model => (
                   <option key={model} value={model}>{model}</option>
                 ))}
+              </select>
+            </div>
+            <div className="flex items-center">
+              <label htmlFor="platform-select" className="mr-3 text-gray-300 font-medium">Platform:</label>
+              <select
+                id="platform-select"
+                value={selectedPlatform}
+                onChange={(e) => handlePlatformChange(e.target.value)}
+                className="border border-gray-500 rounded-md bg-transparent text-white"
+              >
+                <option value="groq">Groq</option>
+                <option value="openrouter">OpenRouter</option>
               </select>
             </div>
             <Link to="/settings" className="btn btn-primary">Settings</Link>
@@ -905,7 +998,7 @@ function App() {
             <ChatInput
               onSendMessage={handleSendMessage}
               loading={loading}
-              visionSupported={visionSupported}
+              visionSupported={isVisionSupported}
             />
           </div>
         </div>

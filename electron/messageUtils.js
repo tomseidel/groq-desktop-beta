@@ -3,20 +3,18 @@
  * Always keeps the first two messages (if available) and the last message
  * Handles image filtering based on specified rules.
  * @param {Array} messages - Complete message history (should be cleaned format)
- * @param {String} model - Selected model name
- * @param {object} modelContextSizes - Object containing context window sizes for models.
+ * @param {Number} contextWindowSize - The context window size (in tokens) for the selected model.
  * @returns {Array} - Pruned message history array
  */
-function pruneMessageHistory(messages, model, modelContextSizes) {
+function pruneMessageHistory(messages, contextWindowSize) {
   // Handle edge cases: empty array, single message, or just two messages
   if (!messages || !Array.isArray(messages) || messages.length <= 2) {
     return messages ? [...messages] : [];
   }
 
-  // Get context window size for the selected model, default if unknown
-  const modelInfo = modelContextSizes[model] || modelContextSizes['default'] || { context: 8192 }; // Ensure default
-  const contextWindow = modelInfo.context;
-  const targetTokenCount = Math.floor(contextWindow * 0.5); // Use 50% of context window
+  // Validate contextWindowSize
+  const effectiveContextWindow = typeof contextWindowSize === 'number' && contextWindowSize > 0 ? contextWindowSize : 8192; // Use provided size or default
+  const targetTokenCount = Math.floor(effectiveContextWindow * 0.5); // Use 50% of context window
 
   // Create a copy to avoid modifying the original array
   let prunedMessages = [...messages];

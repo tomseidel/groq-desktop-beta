@@ -3,7 +3,11 @@ import { Link } from 'react-router-dom';
 
 function Settings() {
   const [settings, setSettings] = useState({
-    GROQ_API_KEY: '',
+    groqApiKey: '',
+    openrouterApiKey: '',
+    selectedPlatform: 'groq',
+    model: '',
+    max_tokens: 4096,
     temperature: 0.7,
     top_p: 0.95,
     mcpServers: {},
@@ -12,7 +16,8 @@ function Settings() {
   });
   const [saveStatus, setSaveStatus] = useState(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [showApiKey, setShowApiKey] = useState(false);
+  const [showGroqApiKey, setShowGroqApiKey] = useState(false);
+  const [showOpenRouterApiKey, setShowOpenRouterApiKey] = useState(false);
   const [newMcpServer, setNewMcpServer] = useState({
     id: '',
     transport: 'stdio',
@@ -35,21 +40,42 @@ function Settings() {
     const loadSettings = async () => {
       try {
         const settingsData = await window.electron.getSettings();
-        if (!settingsData.disabledMcpServers) {
-            settingsData.disabledMcpServers = [];
+        const mergedSettings = {
+          groqApiKey: '',
+          openrouterApiKey: '',
+          selectedPlatform: 'groq',
+          model: '',
+          max_tokens: 4096,
+          temperature: 0.7,
+          top_p: 0.95,
+          mcpServers: {},
+          disabledMcpServers: [],
+          customSystemPrompt: '',
+          ...settingsData,
+          GROQ_API_KEY: undefined
+        };
+        if (settingsData.GROQ_API_KEY && !mergedSettings.groqApiKey) {
+            mergedSettings.groqApiKey = settingsData.GROQ_API_KEY;
         }
-        setSettings(settingsData);
+        if (!Array.isArray(mergedSettings.disabledMcpServers)) {
+          mergedSettings.disabledMcpServers = [];
+        }
+
+        setSettings(mergedSettings);
       } catch (error) {
         console.error('Error loading settings:', error);
-        setSettings(prev => ({
-            ...prev,
-            GROQ_API_KEY: '',
+        setSettings({
+            groqApiKey: '',
+            openrouterApiKey: '',
+            selectedPlatform: 'groq',
+            model: '',
+            max_tokens: 4096,
             temperature: 0.7,
             top_p: 0.95,
             mcpServers: {},
             disabledMcpServers: [],
             customSystemPrompt: ''
-        }));
+        });
       }
     };
 
@@ -117,6 +143,14 @@ function Settings() {
     const updatedSettings = { ...settings, [name]: value };
     setSettings(updatedSettings);
     saveSettings(updatedSettings);
+  };
+
+  const handlePlatformChange = (e) => {
+    const { name, value } = e.target;
+    const updatedSettings = { ...settings, [name]: value };
+    setSettings(updatedSettings);
+    saveSettings(updatedSettings);
+    console.log(`Platform changed to: ${value}`);
   };
 
   const handleNumberChange = (e) => {
@@ -606,6 +640,26 @@ function Settings() {
         </div>
 
         <div className="max-w-2xl mx-auto bg-user-message-bg rounded-lg p-6">
+          {/* --- Platform Selection --- */}
+          <div className="mb-6 border-b border-gray-700 pb-6">
+             <label htmlFor="platform-select" className="block text-lg font-semibold text-white mb-3">
+              Active AI Platform
+             </label>
+             <select
+               id="platform-select"
+               name="selectedPlatform"
+               value={settings.selectedPlatform || 'groq'}
+               onChange={handlePlatformChange}
+               className="w-full px-3 py-2 border border-gray-500 rounded-md bg-transparent text-white focus:outline-none focus:ring-2 focus:ring-primary"
+             >
+               <option value="groq">Groq</option>
+               <option value="openrouter">OpenRouter</option>
+             </select>
+             <p className="text-xs text-gray-400 mt-2">
+               Select the primary API provider to use for chat completions.
+             </p>
+          </div>
+
           {settingsPath && (
             <div className="mb-4 p-3 rounded text-sm bg-custom-dark-bg">
               <p className="text-gray-400">
@@ -614,18 +668,20 @@ function Settings() {
             </div>
           )}
 
-          <h2 className="text-xl font-semibold mb-4 text-white">Groq API Settings</h2>
-          
+          {/* --- API Keys Section --- */}
+          <h2 className="text-xl font-semibold mb-4 text-white">API Keys</h2>
+
+          {/* Groq API Key */}
           <div className="mb-4">
-            <label htmlFor="api-key" className="block text-sm font-medium text-gray-300 mb-2">
-              API Key
+            <label htmlFor="groq-api-key" className="block text-sm font-medium text-gray-300 mb-2">
+              Groq API Key
             </label>
             <div className="relative">
               <input
-                type={showApiKey ? "text" : "password"}
-                id="api-key"
-                name="GROQ_API_KEY"
-                value={settings.GROQ_API_KEY || ''}
+                type={showGroqApiKey ? "text" : "password"}
+                id="groq-api-key"
+                name="groqApiKey"
+                value={settings.groqApiKey || ''}
                 onChange={handleChange}
                 className="w-full px-3 py-2 border border-gray-500 rounded-md focus:outline-none focus:ring-2 focus:ring-primary bg-transparent text-white placeholder-gray-400"
                 placeholder="Enter your GROQ API key"
@@ -633,9 +689,9 @@ function Settings() {
               <button
                 type="button"
                 className="absolute inset-y-0 right-0 pr-3 flex items-center"
-                onClick={() => setShowApiKey(!showApiKey)}
+                onClick={() => setShowGroqApiKey(!showGroqApiKey)}
               >
-                {showApiKey ? (
+                {showGroqApiKey ? (
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
                     <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
                     <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd" />
@@ -650,6 +706,42 @@ function Settings() {
             </div>
           </div>
 
+          {/* OpenRouter API Key */}
+          <div className="mb-4">
+            <label htmlFor="openrouter-api-key" className="block text-sm font-medium text-gray-300 mb-2">
+              OpenRouter API Key
+            </label>
+            <div className="relative">
+              <input
+                type={showOpenRouterApiKey ? "text" : "password"}
+                id="openrouter-api-key"
+                name="openrouterApiKey"
+                value={settings.openrouterApiKey || ''}
+                onChange={handleChange}
+                className="w-full px-3 py-2 border border-gray-500 rounded-md focus:outline-none focus:ring-2 focus:ring-primary bg-transparent text-white placeholder-gray-400"
+                placeholder="Enter your OpenRouter API key (sk-...)"
+              />
+              <button
+                type="button"
+                className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                onClick={() => setShowOpenRouterApiKey(!showOpenRouterApiKey)}
+              >
+                {showOpenRouterApiKey ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
+                    <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd" />
+                  </svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M3.707 2.293a1 1 0 00-1.414 1.414l14 14a1 1 0 001.414-1.414l-1.473-1.473A10.014 10.014 0 0019.542 10C18.268 5.943 14.478 3 10 3a9.958 9.958 0 00-4.512 1.074l-1.78-1.781zm4.261 4.26l1.514 1.515a2.003 2.003 0 012.45 2.45l1.514 1.514a4 4 0 00-5.478-5.478z" clipRule="evenodd" />
+                    <path d="M12.454 16.697L9.75 13.992a4 4 0 01-3.742-3.741L2.335 6.578A9.98 9.98 0 00.458 10c1.274 4.057 5.065 7 9.542 7 .847 0 1.669-.105 2.454-.303z" />
+                  </svg>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* --- Generation Parameters Section --- */}
           <h3 className="text-lg font-medium mt-6 mb-3 text-white">Generation Parameters</h3>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -701,6 +793,33 @@ function Settings() {
               </p>
             </div>
           </div>
+
+          {/* Max Tokens */}
+          <div>
+              <label htmlFor="max_tokens" className="block text-sm font-medium text-gray-300 mb-2">
+                Max Tokens: {settings.max_tokens}
+              </label>
+              <div className="flex items-center">
+                <span className="mr-2 text-xs text-gray-400">1</span>
+                <input
+                  type="range"
+                  id="max_tokens"
+                  name="max_tokens"
+                  min="1"
+                  // Set a reasonable upper limit, e.g., 8192 or higher if needed
+                  // Common values are often 2048, 4096, 8192
+                  max="8192" 
+                  step="1"
+                  value={settings.max_tokens}
+                  onChange={handleNumberChange} // Use the existing handler for number inputs
+                  className="w-full"
+                />
+                <span className="ml-2 text-xs text-gray-400">8192</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                Maximum number of tokens the model should generate in the response.
+              </p>
+            </div>
 
           {/* Custom System Prompt Section */}
           <div className="mt-6 border-t border-gray-700 pt-6">
