@@ -4,6 +4,7 @@ import MessageList from './components/MessageList';
 import ChatInput from './components/ChatInput';
 import ToolsPanel from './components/ToolsPanel';
 import ToolApprovalModal from './components/ToolApprovalModal';
+import ChatListSidebar from './components/ChatListSidebar';
 import { useChat } from './context/ChatContext'; // Import useChat hook
 // Import shared model definitions - REMOVED
 // import { MODEL_CONTEXT_SIZES } from '../../shared/models';
@@ -65,7 +66,15 @@ const setToolApprovalStatus = (toolName, status) => {
 
 function App() {
   // const [messages, setMessages] = useState([]); // Remove local state
-  const { messages, setMessages } = useChat(); // Use context state
+  const { 
+    messages, 
+    setMessages, 
+    // Add context state/setters needed for chat persistence
+    activeChatId, 
+    setActiveChatId, 
+    savedChats, 
+    setSavedChats 
+  } = useChat(); // Use context state
   const [loading, setLoading] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState('groq'); // 'groq' or 'openrouter'
   const [selectedModel, setSelectedModel] = useState(''); // Model ID for the selected platform
@@ -110,6 +119,209 @@ function App() {
     setLoading(false); // Ensure loading indicator is off
     console.log("Chat cleared.");
   };
+
+  // --- Task 10: New Chat Logic ---
+  const handleNewChat = () => {
+    console.log("[handleNewChat] Called. Current activeChatId:", activeChatId);
+    setMessages([]);      // Clear message history
+    setActiveChatId(null); // Set active chat ID to null
+    setPendingApprovalCall(null); // Clear any pending tool approvals
+    setPausedChatState(null); // Clear any paused state
+    setLoading(false); // Ensure loading indicator is off
+    console.log("[handleNewChat] Finished clearing state.");
+    // Do NOT automatically save here. Saving happens on the first message.
+  };
+  // --- End Task 10 ---
+
+  // --- Task 11: Select Chat Logic ---
+  const handleSelectChat = async (chatId) => {
+    if (!chatId || chatId === activeChatId) {
+        console.log(`Skipping chat selection: chatId is null, undefined, or already active (${chatId})`);
+        return; // Do nothing if no ID or already selected
+    }
+
+    console.log(`Attempting to select and load chat: ${chatId}`);
+    setLoading(true); // Indicate loading state
+    try {
+        const loadResult = await window.electron.loadChat(chatId);
+
+        if (loadResult && loadResult.success && loadResult.chatData) {
+            console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
+            // Clear previous state before loading new chat
+            setPendingApprovalCall(null); 
+            setPausedChatState(null);
+            
+            setMessages(loadResult.chatData.messages || []);
+            setActiveChatId(loadResult.chatData.id);
+
+            // Set platform and model from loaded chat
+            const { platform: loadedPlatform, model: loadedModel } = loadResult.chatData;
+
+            if (loadedPlatform && allPlatformModels[loadedPlatform]) {
+                setSelectedPlatform(loadedPlatform); // Update platform state
+                // Ensure models for this platform are loaded (might need refresh if API keys changed)
+                // Consider if a specific model load is needed here or rely on initial load
+                await loadModelsForPlatform(loadedPlatform); // Reload models for the selected platform just in case
+
+                // Now check if the specific model exists
+                const currentModels = allPlatformModels[loadedPlatform] || {};
+                if (loadedModel && currentModels[loadedModel]) {
+                   setSelectedModel(loadedModel); // Update model state
+                   console.log(`Set platform to ${loadedPlatform} and model to ${loadedModel} from loaded chat.`);
+                } else {
+                   console.warn(`Model ${loadedModel} not found for platform ${loadedPlatform}. Using default for platform.`);
+                   // Let loadModelsForPlatform handle setting a default
+                }
+            } else {
+                 console.warn(`Platform ${loadedPlatform} not recognized or models not loaded. Using current defaults.`);
+                 // Keep existing platform/model or reset? For now, keep existing.
+            }
+        } else {
+            console.error(`Failed to load selected chat ${chatId}:`, loadResult?.error || "Unknown error");
+            // Optionally show an error message to the user
+            // Maybe load a new chat instead? For now, just log error.
+        }
+    } catch (error) {
+        console.error(`Error during chat selection for ${chatId}:`, error);
+    } finally {
+        setLoading(false); // Stop loading indicator
+    }
+  };
+  // --- End Task 11 ---
+
+  // --- Task 12 Helper: Save Chat Logic ---
+  const saveCurrentChat = async (messagesToSave) => {
+    console.log(`[saveCurrentChat] Called. ActiveID: ${activeChatId}, Messages Length: ${messagesToSave?.length}`);
+    // Use the messages passed in
+    if (!messagesToSave || messagesToSave.length === 0) {
+      console.log("[saveCurrentChat] Skipping save: No messages provided.");
+      return; // Don't save empty chats unnecessarily
+    }
+
+    // Find the existing title if we have an active chat ID
+    const existingChat = savedChats.find(chat => chat.id === activeChatId);
+    const title = existingChat?.title; // Use existing title if available
+
+    const chatDataToSave = {
+      id: activeChatId, // Will be null for a new chat, backend generates ID
+      messages: messagesToSave,
+      platform: selectedPlatform,
+      model: selectedModel,
+      // Only include title if we found one (for existing chats)
+      // For new chats, the backend will generate a title
+      ...(title && { title: title }),
+    };
+
+    console.log(`[saveCurrentChat] Preparing to save chat ${chatDataToSave.id ? 'ID: ' + chatDataToSave.id : '(new)'}. Platform: ${chatDataToSave.platform}, Model: ${chatDataToSave.model}`);
+    try {
+      const saveResult = await window.electron.saveChat(chatDataToSave);
+
+      if (saveResult && saveResult.success && saveResult.savedChatData) {
+        const savedData = saveResult.savedChatData;
+        console.log(`[saveCurrentChat] Backend save successful for ID: ${savedData.id}.`);
+
+        const wasNewChat = !activeChatId;
+        if (wasNewChat) {
+          setActiveChatId(savedData.id);
+          console.log(`[saveCurrentChat] Updated activeChatId for new chat: ${savedData.id}`);
+        }
+
+        // Refresh the saved chats list
+        console.log("[saveCurrentChat] Refreshing chat list after save...");
+        const updatedChatList = await window.electron.listChats();
+        setSavedChats(updatedChatList || []);
+        console.log(`[saveCurrentChat] Chat list refreshed. Count: ${updatedChatList?.length || 0}`);
+
+      } else {
+        console.error("[saveCurrentChat] Backend save failed:", saveResult?.error || "Unknown backend error");
+      }
+    } catch (error) {
+      console.error("[saveCurrentChat] Error calling saveChat IPC handler:", error);
+    }
+  };
+  // --- End Task 12 Helper ---
+
+  // --- Task 13: Delete Chat Logic ---
+  const handleDeleteChat = async (chatIdToDelete) => {
+    if (!chatIdToDelete) {
+      console.error("handleDeleteChat called with no ID.");
+      return;
+    }
+
+    // Add confirmation dialog
+    if (!window.confirm(`Are you sure you want to delete chat "${savedChats.find(c=>c.id === chatIdToDelete)?.title || chatIdToDelete}"? This action cannot be undone.`)) {
+      console.log(`Deletion cancelled for chat: ${chatIdToDelete}`);
+      return;
+    }
+
+    console.log(`Attempting to delete chat: ${chatIdToDelete}`);
+    try {
+      const deleteResult = await window.electron.deleteChat(chatIdToDelete);
+
+      if (deleteResult && deleteResult.success) {
+        console.log(`Chat ${chatIdToDelete} deleted successfully.`);
+
+        // Refresh the chat list immediately
+        const updatedChatList = await window.electron.listChats();
+        setSavedChats(updatedChatList || []);
+        console.log(`Refreshed chat list, found ${updatedChatList?.length || 0} chats.`);
+
+        // If the deleted chat was the active one, load another or start new
+        if (activeChatId === chatIdToDelete) {
+          console.log(`Deleted chat ${chatIdToDelete} was active. Selecting new chat...`);
+          if (updatedChatList && updatedChatList.length > 0) {
+            // Load the new most recent chat
+            console.log(`Loading next most recent chat: ${updatedChatList[0].id}`);
+            await handleSelectChat(updatedChatList[0].id);
+          } else {
+            // No chats left, start a new one
+            console.log("No chats remaining, starting new session.");
+            handleNewChat(); 
+          }
+        } else {
+           console.log(`Deleted chat ${chatIdToDelete} was not active. Current chat remains: ${activeChatId}`);
+           // Active chat wasn't deleted, no need to change view unless list update affects it
+        }
+      } else {
+        console.error(`Failed to delete chat ${chatIdToDelete}:`, deleteResult?.error || "Unknown backend error");
+        // Optionally notify the user
+      }
+    } catch (error) {
+      console.error(`Error calling deleteChat IPC handler for ${chatIdToDelete}:`, error);
+      // Optionally notify the user
+    }
+  };
+  // --- End Task 13 ---
+
+  // --- Phase 4: Rename Chat Logic ---
+  const handleRenameChat = async (chatId, newTitle) => {
+      console.log(`[handleRenameChat] Attempting to rename chat ${chatId} to "${newTitle}"`);
+      if (!chatId || !newTitle || !newTitle.trim()) {
+          console.error("[handleRenameChat] Invalid arguments provided.");
+          return; // Or provide feedback
+      }
+      
+      try {
+          const renameResult = await window.electron.updateChatMetadata(chatId, { title: newTitle.trim() });
+          
+          if (renameResult && renameResult.success) {
+              console.log(`[handleRenameChat] Chat ${chatId} renamed successfully.`);
+              // Refresh list if the backend indicates a change occurred
+              if (renameResult.needsRefresh) {
+                 console.log("[handleRenameChat] Refreshing chat list after rename...");
+                 const updatedChatList = await window.electron.listChats();
+                 setSavedChats(updatedChatList || []);
+              }
+          } else {
+               console.error(`[handleRenameChat] Failed to rename chat ${chatId}:`, renameResult?.error || "Unknown backend error");
+              // Optionally notify user of failure
+          }
+      } catch (error) {
+           console.error(`[handleRenameChat] Error calling updateChatMetadata IPC handler for ${chatId}:`, error);
+           // Optionally notify user
+      }
+  };
+  // --- End Phase 4 Rename ---
 
   // --- Function to load models for a specific platform ---
   const loadModelsForPlatform = async (platform) => {
@@ -280,6 +492,50 @@ function App() {
           }
         });
 
+        // --- Task 9: Load Initial Chat List and Potentially Load Last Chat ---
+        console.log("Loading initial chat list...");
+        const chatList = await window.electron.listChats();
+        setSavedChats(chatList || []); // Update context
+        console.log(`Found ${chatList?.length || 0} saved chats.`);
+
+        if (chatList && chatList.length > 0) {
+          const mostRecentChat = chatList[0]; // Backend sorts by lastModified desc
+          console.log(`Attempting to load most recent chat: ${mostRecentChat.id} (${mostRecentChat.title})`);
+          const loadResult = await window.electron.loadChat(mostRecentChat.id);
+
+          if (loadResult && loadResult.success && loadResult.chatData) {
+            console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
+            setMessages(loadResult.chatData.messages || []);
+            setActiveChatId(loadResult.chatData.id);
+            // Set platform and model based on the loaded chat
+            // Ensure platform is loaded first before model
+            if (loadResult.chatData.platform && allPlatformModels[loadResult.chatData.platform]) {
+              setSelectedPlatform(loadResult.chatData.platform);
+              // Make sure the model exists for the loaded platform
+              if (loadResult.chatData.model && allPlatformModels[loadResult.chatData.platform][loadResult.chatData.model]) {
+                setSelectedModel(loadResult.chatData.model);
+                 console.log(`Set platform to ${loadResult.chatData.platform} and model to ${loadResult.chatData.model} from loaded chat.`);
+              } else {
+                console.warn(`Model ${loadResult.chatData.model} not found for platform ${loadResult.chatData.platform}. Using default.`);
+                // Fallback logic already exists in loadModelsForPlatform, should be okay
+              }
+            } else {
+               console.warn(`Platform ${loadResult.chatData.platform} not recognized or models not loaded. Using current defaults.`);
+            }
+          } else {
+            console.error(`Failed to load most recent chat ${mostRecentChat.id}:`, loadResult?.error || "Unknown error");
+            // Start a new chat if loading failed
+            setMessages([]);
+            setActiveChatId(null);
+          }
+        } else {
+          // No saved chats, start a new one
+          console.log("No saved chats found. Starting a new chat session.");
+          setMessages([]);
+          setActiveChatId(null);
+        }
+        // --- End Task 9 ---
+
         // Clean up the event listener when component unmounts
         return () => {
           if (removeListener) removeListener();
@@ -341,7 +597,7 @@ function App() {
   const executeToolCall = async (toolCall) => {
     try {
       const response = await window.electron.executeToolCall(toolCall);
-      console.log(`Tool call response: ${JSON.stringify(response)}`);
+      //console.log(`Tool call response: ${JSON.stringify(response)}`);
       // Return the tool response message in the correct format
       return {
         role: 'tool',
@@ -411,7 +667,7 @@ function App() {
   // Core function to execute a chat turn (fetch response, handle tools)
   // Refactored from the main loop of handleSendMessage
   const executeChatTurn = async (turnMessages) => {
-    let currentTurnStatus = 'processing'; // processing, completed, paused, error
+    let currentTurnStatus = 'processing';
     let turnAssistantMessage = null;
     let turnToolResponses = [];
 
@@ -440,13 +696,22 @@ function App() {
 
         streamHandler.onContent(({ content }) => {
             finalAssistantData.content += content;
-            setMessages(prev => {
-                const newMessages = [...prev];
-                const idx = newMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                if (idx !== -1) {
-                    newMessages[idx] = { ...newMessages[idx], content: finalAssistantData.content };
+            // Update the placeholder message's content directly
+            setMessages(prevMessages => {
+                // Find the index of the streaming message *in the current state*
+                const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
+                if (streamingMsgIndex !== -1) {
+                    // Create a new array with the updated message content
+                    const updatedMessages = [...prevMessages];
+                    updatedMessages[streamingMsgIndex] = {
+                        ...prevMessages[streamingMsgIndex], // Keep existing props like role, isStreaming
+                        content: finalAssistantData.content // Update the content
+                    };
+                    return updatedMessages;
                 }
-                return newMessages;
+                // If placeholder somehow vanished (shouldn't happen), return previous state to avoid errors
+                console.warn("[onContent] Streaming placeholder not found in state.");
+                return prevMessages;
             });
         });
 
@@ -465,6 +730,7 @@ function App() {
         // Handle stream completion
         await new Promise((resolve, reject) => {
             streamHandler.onComplete((data) => {
+                // Final assistant message data is complete here
                 finalAssistantData = {
                     role: 'assistant',
                     content: data.content || '',
@@ -473,88 +739,77 @@ function App() {
                 };
                 turnAssistantMessage = finalAssistantData; // Store the completed message
 
-                setMessages(prev => {
-                    const newMessages = [...prev];
-                    const idx = newMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                    if (idx !== -1) {
-                        newMessages[idx] = finalAssistantData; // Replace placeholder
-                    } else {
-                         // Should not happen if placeholder logic is correct
-                         console.warn("Streaming placeholder not found for replacement.");
-                         newMessages.push(finalAssistantData);
+                // Replace the placeholder with the final, non-streaming message
+                setMessages(prevMessages => {
+                    // Find the index of the streaming message *in the current state*
+                    const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
+                    if (streamingMsgIndex !== -1) {
+                        // Create a new array replacing the placeholder with the final data
+                        const finalMessages = [...prevMessages];
+                        finalMessages[streamingMsgIndex] = finalAssistantData; // Replace with final object (isStreaming is false/undefined now)
+                        return finalMessages;
                     }
-                    return newMessages;
+                    // If placeholder somehow vanished, add the final message
+                    console.warn("[onComplete] Streaming placeholder not found, adding final message.");
+                    return [...prevMessages, finalAssistantData];
                 });
                 resolve();
             });
 
             streamHandler.onError(({ error }) => {
-                console.error('Stream error:', error);
-                // Replace placeholder with error
-                setMessages(prev => {
-                   const newMessages = [...prev];
-                   const idx = newMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                   const errorMsg = { role: 'assistant', content: `Stream Error: ${error}`, isStreaming: false };
-                   if (idx !== -1) {
-                       newMessages[idx] = errorMsg;
-                   } else {
-                       newMessages.push(errorMsg);
-                   }
-                   return newMessages;
-                });
-                reject(new Error(error));
+                 // ... (error handling updates UI state) ...
+                 setMessages(prev => {
+                     // ... (logic to update messages state with error) ...
+                    // Don't update finalTurnMessages here anymore
+                     return newMessages;
+                 });
+                 reject(new Error(error));
             });
         });
 
-        // Clean up stream handlers
         streamHandler.cleanup();
 
-        // Check and process tool calls if any
+        // Process tools *after* stream completion
         if (turnAssistantMessage && turnAssistantMessage.tool_calls?.length > 0) {
-            // IMPORTANT: Pass the messages *before* this assistant message was added
             const { status: toolProcessingStatus, toolResponseMessages } = await processToolCalls(
                 turnAssistantMessage,
-                turnMessages // Pass the input messages for this turn
+                turnMessages 
             );
-
-            turnToolResponses = toolResponseMessages; // Store responses from this turn
-
-            if (toolProcessingStatus === 'paused') {
-                currentTurnStatus = 'paused'; // Signal pause to the caller
-            } else if (toolProcessingStatus === 'completed') {
-                 // If tools completed, the caller might loop
-                 currentTurnStatus = 'completed_with_tools';
-            } else { // Handle potential errors from processToolCalls if added
-                currentTurnStatus = 'error';
-            }
-        } else {
-             // No tools, this turn is complete
+            turnToolResponses = toolResponseMessages;
+            currentTurnStatus = toolProcessingStatus === 'paused' ? 'paused' : 'completed_with_tools';
+            if (toolProcessingStatus === 'error') currentTurnStatus = 'error'; // Handle tool processing errors
+        } else if (turnAssistantMessage) {
              currentTurnStatus = 'completed_no_tools';
+        } else {
+            // If turnAssistantMessage is null (e.g., stream error happened), it's an error state
+            currentTurnStatus = 'error';
         }
 
     } catch (error) {
-      console.error('Error in executeChatTurn:', error);
-      // Ensure placeholder is replaced or an error message is added
-       setMessages(prev => {
-           const newMessages = [...prev];
-           const idx = newMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-           const errorMsg = { role: 'assistant', content: `Error: ${error.message}`, isStreaming: false };
-            if (idx !== -1) {
-                newMessages[idx] = errorMsg;
-            } else {
-                // If streaming never started, add the error message
-                newMessages.push(errorMsg);
-            }
-           return newMessages;
-       });
-      currentTurnStatus = 'error';
+        // ... (catch block sets UI state) ...
+        currentTurnStatus = 'error';
     }
 
-    // Return the outcome of the turn
+    // Construct final message list reliably HERE
+    let finalMessagesForTurn = turnMessages; // Start with input
+    if (turnAssistantMessage) {
+        finalMessagesForTurn = [...finalMessagesForTurn, turnAssistantMessage];
+    }
+    if (currentTurnStatus === 'completed_with_tools' && turnToolResponses.length > 0) {
+         const formattedToolResponses = turnToolResponses.map(msg => ({
+             role: 'tool',
+             content: msg.content,
+             tool_call_id: msg.tool_call_id
+         }));
+        finalMessagesForTurn = [...finalMessagesForTurn, ...formattedToolResponses];
+    }
+     // Note: If status is 'paused' or 'error', finalMessagesForTurn might only contain up to the assistant message
+
     return {
-        status: currentTurnStatus, // 'completed_no_tools', 'completed_with_tools', 'paused', 'error'
+        status: currentTurnStatus,
         assistantMessage: turnAssistantMessage,
         toolResponseMessages: turnToolResponses,
+        finalMessages: finalMessagesForTurn // Return the reliably constructed list
     };
   };
 
@@ -596,7 +851,7 @@ function App() {
     };
     // Add user message optimistically BEFORE the API call
     const initialMessages = [...messages, userMessage];
-    setMessages(initialMessages);
+    setMessages(initialMessages); // <<< TEMP: Restore optimistic update
 
     setLoading(true);
 
@@ -605,13 +860,14 @@ function App() {
 
     try {
         while (conversationStatus === 'processing' || conversationStatus === 'completed_with_tools') {
-            const { status, assistantMessage, toolResponseMessages } = await executeChatTurn(currentApiMessages);
-
+            // Get the result, including the final message list for the turn
+            const { status, assistantMessage, toolResponseMessages, finalMessages: turnFinalMessages } = await executeChatTurn(currentApiMessages);
+            
+            currentApiMessages = turnFinalMessages; // Update messages for the next potential loop/save
             conversationStatus = status; // Update status for loop condition
 
             if (status === 'paused') {
                  // Pause initiated by executeChatTurn/processToolCalls
-                 // Loading state remains true, waiting for modal interaction
                  break; // Exit the loop
             } else if (status === 'error') {
                  // Error occurred, stop the loop
@@ -654,9 +910,15 @@ function App() {
         setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${error.message}` }]);
         conversationStatus = 'error'; // Ensure loading state is handled
     } finally {
+        console.log(`[handleSendMessage] Finally block. Status: ${conversationStatus}`);
         // Only set loading false if the conversation is not paused
         if (conversationStatus !== 'paused') {
             setLoading(false);
+            // --- Task 12: Save chat after successful turn completion ---
+            // Use the final messages returned from the last successful turn
+            console.log(`[handleSendMessage] Conversation complete. Calling saveCurrentChat. Messages Length: ${currentApiMessages?.length}`);
+            saveCurrentChat(currentApiMessages); // Pass the definitive final messages
+            // --- End Task 12 --- 
         }
     }
   };
@@ -747,15 +1009,22 @@ function App() {
         // Pass the fully prepared message list for the *next* API call
         // We need to handle the loading state correctly after this returns
         try {
-             // Start the next turn
-             const { status: nextTurnStatus } = await executeChatTurn(nextApiMessages);
-             // If the *next* turn also pauses, loading state remains true
+             // Start the next turn and get its results
+             const { status: nextTurnStatus, finalMessages: finalMessagesAfterResume } = await executeChatTurn(nextApiMessages);
+
+             // If the *next* turn also pauses, loading state remains true, otherwise stop loading
              if (nextTurnStatus !== 'paused') {
                  setLoading(false);
+                 // --- Task 12 (Revised): Save chat after successful resume/completion ---
+                 console.log(`[resumeChatFlow] Resumed turn completed. Status: ${nextTurnStatus}. Calling saveCurrentChat.`);
+                 saveCurrentChat(finalMessagesAfterResume); // Save the definitive final list
+                 // --- End Task 12 --- 
+             } else {
+                // It paused again, do not set loading false
+                 console.log("[resumeChatFlow] Resumed turn resulted in another pause.");
              }
         } catch (error) {
             console.error("Error during resumed chat turn:", error);
-            setMessages(prev => [...prev, { role: 'assistant', content: `Error after resuming: ${error.message}` }]);
             setLoading(false); // Stop loading on error
         }
      }
@@ -899,128 +1168,131 @@ function App() {
   const isVisionSupported = allPlatformModels[selectedPlatform]?.[selectedModel]?.vision_supported || false;
 
   return (
-    <div className="flex flex-col h-screen">
-      <header className="bg-user-message-bg shadow">
-        <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8 flex justify-between items-center">
-          <h1 className="text-2xl text-white">
-            groq<span className="text-primary">desktop</span>
-          </h1>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center">
-              <label htmlFor="model-select" className="mr-3 text-gray-300 font-medium">Model:</label>
-              <select
-                id="model-select"
-                value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="border border-gray-500 rounded-md bg-transparent text-white"
-              >
-                {models.map(model => (
-                  <option key={model} value={model}>{model}</option>
-                ))}
-              </select>
+    <div className="flex flex-row h-screen bg-gray-900">
+      {/* --- Chat List Sidebar --- */}
+      <ChatListSidebar 
+        onNewChat={handleNewChat}
+        onSelectChat={handleSelectChat}
+        onDeleteChat={handleDeleteChat}
+        onRenameChat={handleRenameChat}
+      />
+
+      {/* --- Main Chat Area (takes remaining space) --- */}
+      <div className="flex flex-col flex-1 h-screen">
+        <header className="bg-user-message-bg shadow">
+          <div className="max-w-7xl mx-auto py-4 px-4 sm:px-6 lg:px-8 flex justify-between items-center">
+            <h1 className="text-2xl text-white">
+              groq<span className="text-primary">desktop</span>
+            </h1>
+            <div className="flex items-center gap-4">
+              <div className="flex items-center">
+                <label htmlFor="model-select" className="mr-3 text-gray-300 font-medium">Model:</label>
+                <select
+                  id="model-select"
+                  value={selectedModel}
+                  onChange={(e) => setSelectedModel(e.target.value)}
+                  className="border border-gray-500 rounded-md bg-transparent text-white"
+                >
+                  {models.map(model => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center">
+                <label htmlFor="platform-select" className="mr-3 text-gray-300 font-medium">Platform:</label>
+                <select
+                  id="platform-select"
+                  value={selectedPlatform}
+                  onChange={(e) => handlePlatformChange(e.target.value)}
+                  className="border border-gray-500 rounded-md bg-transparent text-white"
+                >
+                  <option value="groq">Groq</option>
+                  <option value="openrouter">OpenRouter</option>
+                </select>
+              </div>
+              <Link to="/settings" className="btn btn-primary">Settings</Link>
             </div>
-            <div className="flex items-center">
-              <label htmlFor="platform-select" className="mr-3 text-gray-300 font-medium">Platform:</label>
-              <select
-                id="platform-select"
-                value={selectedPlatform}
-                onChange={(e) => handlePlatformChange(e.target.value)}
-                className="border border-gray-500 rounded-md bg-transparent text-white"
-              >
-                <option value="groq">Groq</option>
-                <option value="openrouter">OpenRouter</option>
-              </select>
-            </div>
-            <Link to="/settings" className="btn btn-primary">Settings</Link>
-            {/* Add Clear Chat Button */}
-            <button 
-              onClick={handleClearChat} 
-              className="btn btn-secondary" // You might need to define btn-secondary styles
-              title="Clear Chat History"
-            >
-              Clear Chat
-            </button>
           </div>
-        </div>
-      </header>
-      
-      <main className="flex-1 overflow-hidden flex flex-col">
-        <div className="flex-1 overflow-y-auto p-2">
-          <MessageList 
-            messages={messages} 
-            onToolCallExecute={executeToolCall} 
-            onRemoveLastMessage={handleRemoveLastMessage} 
-          />
-          <div ref={messagesEndRef} />
-        </div>
+        </header>
         
-        <div className="bg-user-message-bg p-2">
-          <div className="flex flex-col gap-4">
-            <div className="flex justify-between items-center">
-              <div className="flex items-center gap-3">
-                <div className="tools-container">
-                  <div 
-                    className="tools-button"
-                    onClick={() => {
-                      setIsToolsPanelOpen(!isToolsPanelOpen);
-                      // Force refresh of MCP tools when opening panel
-                      if (!isToolsPanelOpen) {
-                        refreshMcpTools();
-                      }
-                    }}
-                  >
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
+        <main className="flex-1 overflow-hidden flex flex-col">
+          <div className="flex-1 overflow-y-auto p-2">
+            <MessageList 
+              messages={messages} 
+              onToolCallExecute={executeToolCall} 
+              onRemoveLastMessage={handleRemoveLastMessage} 
+            />
+            <div ref={messagesEndRef} />
+          </div>
+          
+          <div className="bg-user-message-bg p-2">
+            <div className="flex flex-col gap-4">
+              <div className="flex justify-between items-center">
+                <div className="flex items-center gap-3">
+                  <div className="tools-container">
+                    <div 
+                      className="tools-button"
+                      onClick={() => {
+                        setIsToolsPanelOpen(!isToolsPanelOpen);
+                        // Force refresh of MCP tools when opening panel
+                        if (!isToolsPanelOpen) {
+                          refreshMcpTools();
+                        }
+                      }}
+                    >
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </div>
+                    {mcpServersStatus.loading && (
+                      <div className="status-indicator loading">
+                        <div className="loading-spinner"></div>
+                        <span>{mcpServersStatus.message}</span>
+                      </div>
+                    )}
+                    {!mcpServersStatus.loading && (
+                      <div className="status-indicator">
+                        <span>{mcpServersStatus.message || "No tools available"}</span>
+                        <button 
+                          className="refresh-button" 
+                          onClick={refreshMcpTools}
+                          title="Refresh MCP tools"
+                        >
+                          <span>↻</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  {mcpServersStatus.loading && (
-                    <div className="status-indicator loading">
-                      <div className="loading-spinner"></div>
-                      <span>{mcpServersStatus.message}</span>
-                    </div>
-                  )}
-                  {!mcpServersStatus.loading && (
-                    <div className="status-indicator">
-                      <span>{mcpServersStatus.message || "No tools available"}</span>
-                      <button 
-                        className="refresh-button" 
-                        onClick={refreshMcpTools}
-                        title="Refresh MCP tools"
-                      >
-                        <span>↻</span>
-                      </button>
-                    </div>
-                  )}
                 </div>
               </div>
+
+              <ChatInput
+                onSendMessage={handleSendMessage}
+                loading={loading}
+                visionSupported={isVisionSupported}
+              />
             </div>
-
-            <ChatInput
-              onSendMessage={handleSendMessage}
-              loading={loading}
-              visionSupported={isVisionSupported}
-            />
           </div>
-        </div>
-      </main>
+        </main>
 
-      {isToolsPanelOpen && (
-        <ToolsPanel
-          tools={mcpTools}
-          onClose={() => setIsToolsPanelOpen(false)}
-          onDisconnectServer={disconnectMcpServer}
-          onReconnectServer={reconnectMcpServer}
-        />
-      )}
+        {isToolsPanelOpen && (
+          <ToolsPanel
+            tools={mcpTools}
+            onClose={() => setIsToolsPanelOpen(false)}
+            onDisconnectServer={disconnectMcpServer}
+            onReconnectServer={reconnectMcpServer}
+          />
+        )}
 
-      {/* --- Tool Approval Modal --- */}
-      {pendingApprovalCall && (
-        <ToolApprovalModal
-          toolCall={pendingApprovalCall}
-          onApprove={handleToolApproval}
-        />
-      )}
-      {/* --- End Tool Approval Modal --- */}
+        {/* --- Tool Approval Modal --- */}
+        {pendingApprovalCall && (
+          <ToolApprovalModal
+            toolCall={pendingApprovalCall}
+            onApprove={handleToolApproval}
+          />
+        )}
+        {/* --- End Tool Approval Modal --- */}
+      </div>
     </div>
   );
 }

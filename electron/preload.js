@@ -52,6 +52,14 @@ contextBridge.exposeInMainWorld('electron', {
   // Function to get model configurations
   getModelConfigs: () => ipcRenderer.invoke('get-model-configs'),
   
+  // --- Chat Persistence Functions ---
+  listChats: () => ipcRenderer.invoke('list-chats'),
+  saveChat: (chatData) => ipcRenderer.invoke('save-chat', chatData),
+  loadChat: (chatId) => ipcRenderer.invoke('load-chat', chatId),
+  deleteChat: (chatId) => ipcRenderer.invoke('delete-chat', chatId),
+  updateChatMetadata: (chatId, metadataUpdate) => ipcRenderer.invoke('update-chat-metadata', chatId, metadataUpdate),
+  // --- End Chat Persistence ---
+  
   // Add event listener for MCP server status changes
   onMcpServerStatusChanged: (callback) => {
     const listener = (event, status) => callback(status);

@@ -1,6 +1,7 @@
-const { app } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, shell, net } = require('electron');
 const fs   = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 
 // Create ~/Library/Logs/Groq Desktop if it does not exist
 app.setAppLogsPath();
@@ -19,7 +20,7 @@ const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 console.log('Groq Desktop started, logging to', logFile);
 
 // Import necessary Electron modules
-const { BrowserWindow, ipcMain, screen, shell, net } = require('electron');
+// const { BrowserWindow, ipcMain, screen, shell, net } = require('electron'); // REMOVED DUPLICATE
 
 // Import shared models
 const { MODEL_CONTEXT_SIZES: FALLBACK_MODEL_DEFINITIONS } = require('../shared/models.js');
@@ -36,6 +37,9 @@ const { initializeWindowManager } = require('./windowManager');
 
 // Global variable to hold the main window instance
 let mainWindow;
+
+// Directory for storing chat files
+const CHATS_DIR = path.join(app.getPath('userData'), 'chats');
 
 // Variable to hold loaded model context sizes (Now fetched from APIs)
 let platformModels = { groq: {}, openrouter: {} }; // State to hold fetched models
@@ -199,6 +203,20 @@ async function fetchOpenRouterModels(apiKey) {
 app.whenReady().then(async () => {
   console.log("App Ready. Initializing...");
 
+  // --- Task 1: Setup Storage Directory ---
+  try {
+    if (!fs.existsSync(CHATS_DIR)) {
+      fs.mkdirSync(CHATS_DIR, { recursive: true });
+      console.log(`Created chats directory at: ${CHATS_DIR}`);
+    } else {
+      console.log(`Chats directory already exists at: ${CHATS_DIR}`);
+    }
+  } catch (error) {
+    console.error(`Failed to create chats directory at ${CHATS_DIR}:`, error);
+    // Consider if this is a fatal error or if the app can continue
+  }
+  // --- End Task 1 ---
+
   // Initialize command resolver first (might be needed by others)
   initializeCommandResolver(app);
 
@@ -272,6 +290,203 @@ app.whenReady().then(async () => {
 
       return modelsToReturn;
   });
+
+  // --- Task 2: List Chats Handler ---
+  ipcMain.handle('list-chats', async () => {
+    console.log("IPC Handler: list-chats invoked");
+    try {
+      const files = await fs.promises.readdir(CHATS_DIR);
+      const chatFiles = files.filter(file => file.endsWith('.json'));
+      const chatsMetadata = [];
+
+      for (const file of chatFiles) {
+        const filePath = path.join(CHATS_DIR, file);
+        try {
+          const content = await fs.promises.readFile(filePath, 'utf-8');
+          const chatData = JSON.parse(content);
+          // Ensure necessary fields exist before adding
+          if (chatData.id && chatData.title && chatData.lastModified) {
+              chatsMetadata.push({
+                  id: chatData.id,
+                  title: chatData.title,
+                  lastModified: chatData.lastModified,
+              });
+          } else {
+              console.warn(`Skipping chat file due to missing fields: ${file}`);
+          }
+        } catch (readError) {
+          console.error(`Error reading or parsing chat file ${file}:`, readError);
+          // Optionally delete corrupted files? Or just skip.
+        }
+      }
+
+      // Sort by lastModified date, newest first
+      chatsMetadata.sort((a, b) => new Date(b.lastModified) - new Date(a.lastModified));
+      console.log(`Found ${chatsMetadata.length} chats.`);
+      return chatsMetadata;
+    } catch (error) {
+      console.error('Error listing chats:', error);
+      // Check if error is because directory doesn't exist, though we try to create it
+      if (error.code === 'ENOENT') {
+          console.log('Chats directory not found while listing - it might need to be created.');
+          return []; // Return empty list if dir doesn't exist
+      }
+      return []; // Return empty list on other errors for now
+    }
+  });
+  // --- End Task 2 ---
+
+  // --- Task 3: Save Chat Handler ---
+  ipcMain.handle('save-chat', async (event, chatData) => {
+    console.log(`IPC Handler: save-chat invoked for ID: ${chatData?.id || 'new'}`);
+    if (!chatData || typeof chatData !== 'object' || !chatData.messages) {
+        console.error("save-chat: Invalid chatData received.");
+        return { success: false, error: "Invalid chat data received" };
+    }
+
+    const chatId = chatData.id || uuidv4(); // Use existing ID or generate a new one
+    const chatFilePath = path.join(CHATS_DIR, `${chatId}.json`);
+    const now = new Date().toISOString();
+
+    const dataToSave = {
+        ...chatData,
+        id: chatId, // Ensure the ID is set/updated
+        lastModified: now,
+        createdAt: chatData.createdAt || now, // Set createdAt only if it doesn't exist
+    };
+
+    // Basic title generation if missing (can be improved later)
+    if (!dataToSave.title) {
+        const firstUserMessage = dataToSave.messages.find(m => m.role === 'user')?.content;
+        if (typeof firstUserMessage === 'string' && firstUserMessage.trim()) {
+            dataToSave.title = firstUserMessage.substring(0, 50) + (firstUserMessage.length > 50 ? '...' : '');
+        } else {
+            dataToSave.title = `Chat ${new Date(dataToSave.createdAt).toLocaleString()}`; // Fallback title
+        }
+        console.log(`Generated title for chat ${chatId}: ${dataToSave.title}`);
+    }
+
+
+    try {
+      await fs.promises.writeFile(chatFilePath, JSON.stringify(dataToSave, null, 2), 'utf-8');
+      console.log(`Chat saved successfully: ${chatFilePath}`);
+      // Return the potentially updated/new data (especially title/id/timestamps)
+      return { success: true, savedChatData: dataToSave };
+    } catch (error) {
+      console.error(`Error saving chat ${chatId}:`, error);
+      return { success: false, error: error.message };
+    }
+  });
+  // --- End Task 3 ---
+
+  // --- Task 4: Load Chat Handler ---
+  ipcMain.handle('load-chat', async (event, chatId) => {
+    console.log(`IPC Handler: load-chat invoked for ID: ${chatId}`);
+    if (!chatId) {
+        console.error("load-chat: No chatId provided.");
+        return { success: false, error: "No chat ID provided" };
+    }
+    const chatFilePath = path.join(CHATS_DIR, `${chatId}.json`);
+
+    try {
+      const content = await fs.promises.readFile(chatFilePath, 'utf-8');
+      const chatData = JSON.parse(content);
+      console.log(`Chat loaded successfully: ${chatFilePath}`);
+      return { success: true, chatData: chatData };
+    } catch (error) {
+      console.error(`Error loading chat ${chatId}:`, error);
+       if (error.code === 'ENOENT') {
+           return { success: false, error: `Chat file not found for ID: ${chatId}` };
+       } else if (error instanceof SyntaxError) {
+            return { success: false, error: `Failed to parse chat file for ID: ${chatId}` };
+       } else {
+           return { success: false, error: error.message };
+       }
+    }
+  });
+  // --- End Task 4 ---
+
+  // --- Task 5: Delete Chat Handler ---
+  ipcMain.handle('delete-chat', async (event, chatId) => {
+    console.log(`IPC Handler: delete-chat invoked for ID: ${chatId}`);
+    if (!chatId) {
+        console.error("delete-chat: No chatId provided.");
+        return { success: false, error: "No chat ID provided" };
+    }
+    const chatFilePath = path.join(CHATS_DIR, `${chatId}.json`);
+
+    try {
+      await fs.promises.unlink(chatFilePath);
+      console.log(`Chat deleted successfully: ${chatFilePath}`);
+      return { success: true };
+    } catch (error) {
+      console.error(`Error deleting chat ${chatId}:`, error);
+      if (error.code === 'ENOENT') {
+          console.warn(`Attempted to delete non-existent chat file: ${chatFilePath}`);
+          // Consider returning success true here as the end state (file gone) is achieved
+          return { success: true };
+      }
+      return { success: false, error: error.message };
+    }
+  });
+  // --- End Task 5 ---
+
+  // --- Phase 4: Rename Chat Handler ---
+  ipcMain.handle('update-chat-metadata', async (event, chatId, metadataUpdate) => {
+    console.log(`IPC Handler: update-chat-metadata invoked for ID: ${chatId}`);
+    if (!chatId || !metadataUpdate || typeof metadataUpdate !== 'object') {
+      console.error("update-chat-metadata: Invalid arguments received.");
+      return { success: false, error: "Invalid arguments for updating chat metadata" };
+    }
+
+    const chatFilePath = path.join(CHATS_DIR, `${chatId}.json`);
+
+    try {
+      // Read existing data
+      const content = await fs.promises.readFile(chatFilePath, 'utf-8');
+      let chatData = JSON.parse(content);
+
+      // Apply updates (only title for now)
+      let updated = false;
+      if (metadataUpdate.hasOwnProperty('title') && typeof metadataUpdate.title === 'string') {
+          if (chatData.title !== metadataUpdate.title) {
+             chatData.title = metadataUpdate.title.trim() || `Chat ${new Date(chatData.createdAt).toLocaleString()}`; // Ensure title is not empty
+             updated = true;
+             console.log(`Updating title for chat ${chatId} to: "${chatData.title}"`);
+          } else {
+             console.log(`Title for chat ${chatId} is already "${metadataUpdate.title}", no update needed.`);
+          }
+      }
+      // Add other metadata updates here if needed in the future
+
+      if (!updated) {
+          console.log(`No actual metadata changes for chat ${chatId}. Skipping write.`);
+          // Return success, but indicate no change occurred?
+          // Return existing data to be safe
+          return { success: true, updatedChatData: chatData, needsRefresh: false };
+      }
+
+      // Update lastModified timestamp
+      chatData.lastModified = new Date().toISOString();
+
+      // Write updated data back
+      await fs.promises.writeFile(chatFilePath, JSON.stringify(chatData, null, 2), 'utf-8');
+      console.log(`Chat metadata updated successfully: ${chatFilePath}`);
+      // Return the full updated data
+      return { success: true, updatedChatData: chatData, needsRefresh: true };
+
+    } catch (error) {
+      console.error(`Error updating metadata for chat ${chatId}:`, error);
+      if (error.code === 'ENOENT') {
+        return { success: false, error: `Chat file not found for ID: ${chatId}` };
+      } else if (error instanceof SyntaxError) {
+        return { success: false, error: `Failed to parse chat file for ID: ${chatId}` };
+      } else {
+        return { success: false, error: error.message };
+      }
+    }
+  });
+  // --- End Rename Chat Handler ---
 
   // --- Post-initialization Tasks --- //
 
