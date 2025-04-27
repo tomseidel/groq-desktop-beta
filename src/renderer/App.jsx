@@ -63,16 +63,17 @@ const setToolApprovalStatus = (toolName, status) => {
 
 
 function App() {
-  // const [messages, setMessages] = useState([]); // Remove local state
+  // Use context state
   const { 
     messages, 
     setMessages, 
-    // Add context state/setters needed for chat persistence
     activeChatId, 
     setActiveChatId, 
     savedChats, 
-    setSavedChats 
-  } = useChat(); // Use context state
+    setSavedChats,
+    thinkingSteps, // Get thinkingSteps state
+    setThinkingSteps // Get thinkingSteps setter
+  } = useChat(); 
   const [loading, setLoading] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState('groq'); // 'groq' or 'openrouter'
   const [selectedModel, setSelectedModel] = useState(''); // Model ID for the selected platform
@@ -98,6 +99,8 @@ function App() {
   const [pendingApprovalCall, setPendingApprovalCall] = useState(null); // Holds the tool call object needing approval
   const [pausedChatState, setPausedChatState] = useState(null); // Holds { currentMessages, finalAssistantMessage, accumulatedResponses }
   // --- End Tool Approval State ---
+
+  const [lastSavedMessageId, setLastSavedMessageId] = useState(null); // Track last saved message
 
   const handleRemoveLastMessage = () => {
     setMessages(prev => {
@@ -143,13 +146,13 @@ function App() {
         return; // Do nothing if no ID or already selected
     }
 
-    console.log(`Attempting to select and load chat: ${chatId}`);
+    //console.log(`Attempting to select and load chat: ${chatId}`);
     setLoading(true); // Indicate loading state
     try {
         const loadResult = await window.electron.loadChat(chatId);
 
         if (loadResult && loadResult.success && loadResult.chatData) {
-            console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
+            // console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
             // Clear previous state before loading new chat
             setPendingApprovalCall(null); 
             setPausedChatState(null);
@@ -193,17 +196,18 @@ function App() {
   // --- End Task 11 ---
 
   // --- Task 12 Helper: Save Chat Logic ---
-  const saveCurrentChat = async (messagesToSave) => {
-    console.log(`[saveCurrentChat] Called. ActiveID: ${activeChatId}, Messages Length: ${messagesToSave?.length}`);
+  const saveCurrentChat = async (messagesToSave, currentActiveChatId) => {
+    console.log(`[saveCurrentChat ENTRY] ActiveID Param: ${currentActiveChatId}, Messages Length: ${messagesToSave?.length}`);
     // Use the messages passed in
     if (!messagesToSave || messagesToSave.length === 0) {
       console.log("[saveCurrentChat] Skipping save: No messages provided.");
-      return; // Don't save empty chats unnecessarily
+      return; 
     }
 
     // Find the existing title if we have an active chat ID
-    const existingChat = savedChats.find(chat => chat.id === activeChatId);
-    const title = existingChat?.title; // Use existing title if available
+    // Use the passed currentActiveChatId for finding existing chat
+    const existingChat = savedChats.find(chat => chat.id === currentActiveChatId); 
+    const title = existingChat?.title; 
 
     // --- Transform messages for saving (match display format) ---
     const transformedMessages = messagesToSave.map(msg => {
@@ -225,44 +229,37 @@ ${part.content}` };
     // --- End transformation ---
 
     const chatDataToSave = {
-      id: activeChatId, // Will be null for a new chat, backend generates ID
-      messages: transformedMessages, // Use transformed messages for saving
+      id: currentActiveChatId, // Use the passed ID
+      messages: transformedMessages, 
       platform: selectedPlatform,
       model: selectedModel,
-      // Only include title if we found one (for existing chats)
-      // For new chats, the backend will generate a title
       ...(title && { title: title }),
     };
 
     // --- Log messages being saved ---
-    console.log(`[saveCurrentChat] Saving transformed messages:`, JSON.stringify(transformedMessages, null, 2));
+    // console.log(`[saveCurrentChat] Saving transformed messages:`, JSON.stringify(transformedMessages, null, 2));
     // --- End Log ---
 
-    console.log(`[saveCurrentChat] Preparing to save chat ${chatDataToSave.id ? 'ID: ' + chatDataToSave.id : '(new)'}. Platform: ${chatDataToSave.platform}, Model: ${chatDataToSave.model}`);
+    // console.log(`[saveCurrentChat TRY] Saving ID: ${currentActiveChatId || '(new)'}`, chatDataToSave);
     try {
       const saveResult = await window.electron.saveChat(chatDataToSave);
 
       if (saveResult && saveResult.success && saveResult.savedChatData) {
         const savedData = saveResult.savedChatData;
-        console.log(`[saveCurrentChat] Backend save successful for ID: ${savedData.id}.`);
-
-        const wasNewChat = !activeChatId;
-        if (wasNewChat) {
-          setActiveChatId(savedData.id);
-          console.log(`[saveCurrentChat] Updated activeChatId for new chat: ${savedData.id}`);
-        }
-
-        // Refresh the saved chats list
+        console.log(`[saveCurrentChat SUCCESS] Backend ID: ${savedData.id}. Setting activeChatId.`);
+        setActiveChatId(savedData.id);
+        console.log(`[saveCurrentChat] Set activeChatId to saved ID: ${savedData.id}`);
+       
         console.log("[saveCurrentChat] Refreshing chat list after save...");
         const updatedChatList = await window.electron.listChats();
-        setSavedChats(updatedChatList || []);
+        setSavedChats(updatedChatList || []); 
         console.log(`[saveCurrentChat] Chat list refreshed. Count: ${updatedChatList?.length || 0}`);
 
       } else {
-        console.error("[saveCurrentChat] Backend save failed:", saveResult?.error || "Unknown backend error");
+        console.error("[saveCurrentChat FAIL] Backend save failed:", saveResult?.error);
       }
     } catch (error) {
-      console.error("[saveCurrentChat] Error calling saveChat IPC handler:", error);
+      console.error("[saveCurrentChat CATCH] Error calling IPC:", error);
     }
   };
   // --- End Task 12 Helper ---
@@ -352,7 +349,7 @@ ${part.content}` };
   // --- Function to load models for a specific platform ---
   const loadModelsForPlatform = async (platform) => {
       setLoading(true);
-      console.log(`Requesting models for platform: ${platform}`);
+      // console.log(`Requesting models for platform: ${platform}`);
       try {
           const platformConfigs = await window.electron.getModelConfigs(); // This now returns models for the *currently selected* platform in backend settings
           console.log(`Received ${Object.keys(platformConfigs).length} models for ${platform}:`, platformConfigs);
@@ -530,7 +527,7 @@ ${part.content}` };
           const loadResult = await window.electron.loadChat(mostRecentChat.id);
 
           if (loadResult && loadResult.success && loadResult.chatData) {
-            console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
+            // console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
             setMessages(loadResult.chatData.messages || []);
             setActiveChatId(loadResult.chatData.id);
             // Set platform and model based on the loaded chat
@@ -594,11 +591,11 @@ ${part.content}` };
 
     const saveModelSelection = async () => {
       try {
-        console.log(`Attempting to save selected model: ${selectedModel}`); // Debug log
+        // console.log(`Attempting to save selected model: ${selectedModel}`); // Debug log
         const settings = await window.electron.getSettings();
         // Check if the model actually changed before saving
         if (settings.model !== selectedModel) {
-            console.log(`Saving new model selection: ${selectedModel}`);
+            //console.log(`Saving new model selection: ${selectedModel}`);
             await window.electron.saveSettings({ ...settings, model: selectedModel });
         } else {
             // console.log("Model selection hasn't changed, skipping save."); // Optional: Log skips
@@ -698,138 +695,212 @@ ${part.content}` };
     let turnToolResponses = [];
 
     try {
-        // Create a streaming assistant message placeholder
+        // Create a streaming assistant message placeholder with initial status
         const assistantPlaceholder = {
             role: 'assistant',
-            content: '',
-            isStreaming: true
+            // Assign a temporary unique ID to link thinking steps
+            id: `assistant-placeholder-${Date.now()}-${Math.random()}`,
+            content: '', // Initial text
+            finalContent: '', // Text after tool calls
+            status: 'streaming_text', // Initial status
+            isStreaming: true, // Keep this flag for finding the placeholder
+            tool_calls: [] // Initialize tool_calls array
         };
         setMessages(prev => [...prev, assistantPlaceholder]);
+        // Initialize thinking steps for this placeholder
+        setThinkingSteps(prev => ({ ...prev, [assistantPlaceholder.id]: {} }));
 
         // Start streaming chat
+        // NOTE: We pass the messages *before* adding the placeholder, 
+        // as the backend handles the history.
         const streamHandler = window.electron.startChatStream(turnMessages, selectedModel);
-
-        // Collect the final message data
-        let finalAssistantData = {
-            role: 'assistant',
-            content: '',
-            tool_calls: undefined,
-            reasoning: undefined
-        };
 
         // Setup event handlers for streaming
         streamHandler.onStart((startData) => { 
-            /* Placeholder exists */ 
+            currentTurnStreamId = startData.id; // Capture the stream ID
+            console.log("[onStart] Stream started:", startData);
+        });
+
+        // Listen for signal that the *final* response stream is starting
+        streamHandler.onFinalStart(({ id }) => {
+            console.log(`[onFinalStart] Final stream starting for ID: ${id}`);
+            setMessages(prev => prev.map(msg => 
+                msg.id === assistantPlaceholder.id ? { ...msg, status: 'streaming_final_response' } : msg
+            ));
         });
 
         streamHandler.onContent(({ content }) => {
-            finalAssistantData.content += content;
-            // Update the placeholder message's content directly
             setMessages(prevMessages => {
-                // Find the index of the streaming message *in the current state*
-                const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                if (streamingMsgIndex !== -1) {
-                    // Create a new array with the updated message content
+                const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                if (idx !== -1) {
                     const updatedMessages = [...prevMessages];
-                    updatedMessages[streamingMsgIndex] = {
-                        ...prevMessages[streamingMsgIndex], // Keep existing props like role, isStreaming
-                        content: finalAssistantData.content // Update the content
-                    };
+                    const currentMsg = updatedMessages[idx];
+                    // Append to correct content field based on status
+                    if (currentMsg.status === 'streaming_final_response') {
+                         updatedMessages[idx] = {
+                            ...currentMsg,
+                            finalContent: (currentMsg.finalContent || '') + content
+                        };
+                    } else { // Assumed streaming_text or processing_tools
+                         updatedMessages[idx] = {
+                            ...currentMsg,
+                            content: (currentMsg.content || '') + content
+                        };
+                    }
                     return updatedMessages;
                 }
-                // If placeholder somehow vanished (shouldn't happen), return previous state to avoid errors
-                console.warn("[onContent] Streaming placeholder not found in state.");
                 return prevMessages;
             });
         });
-
+        
+        // Capture tool calls associated with the assistant message
         streamHandler.onToolCalls(({ tool_calls }) => {
-            finalAssistantData.tool_calls = tool_calls;
-            setMessages(prev => {
-                 const newMessages = [...prev];
-                 const idx = newMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                 if (idx !== -1) {
-                     newMessages[idx] = { ...newMessages[idx], tool_calls: finalAssistantData.tool_calls };
-                 }
-                 return newMessages;
-            });
+            console.log("[onToolCalls] Received tool calls:", tool_calls);
+            setMessages(prev => prev.map(msg => 
+                msg.id === assistantPlaceholder.id ? { ...msg, tool_calls: tool_calls } : msg
+            ));
         });
 
-        // Handle stream completion
+        // *** NEW: Handle Tool Call Start ***
+        streamHandler.onToolCallStart(({ callId, name, args }) => {
+             console.log(`[onToolCallStart] Tool: ${name}, ID: ${callId}, Args:`, args);
+             // Ensure we update the correct message (identified by placeholder ID)
+             setMessages(prev => prev.map(msg => 
+                 msg.id === assistantPlaceholder.id ? { ...msg, status: 'processing_tools' } : msg
+             ));
+             setThinkingSteps(prev => ({
+                 ...prev,
+                 [assistantPlaceholder.id]: {
+                     ...(prev[assistantPlaceholder.id] || {}),
+                     // Store full details for this specific tool call
+                     [callId]: { name, args, status: 'executing', result: null, error: null } 
+                 }
+             }));
+         });
+
+        // *** NEW: Handle Tool Call End ***
+        streamHandler.onToolCallEnd(({ callId, name, result, error }) => {
+             console.log(`[onToolCallEnd] ID: ${callId}, Error: ${!!error}, Result:`, result);
+             // Update thinking steps state
+             let thinkingStepName = 'unknown_tool'; // Default name
+             setThinkingSteps(prev => {
+                 const currentSteps = prev[assistantPlaceholder.id] || {};
+                 if (!currentSteps[callId]) {
+                     console.warn(`[onToolCallEnd] Thinking step for callId ${callId} not found.`);
+                     currentSteps[callId] = { name: name || 'unknown_tool', args: {}, status: 'executing' }; 
+                 }
+                 thinkingStepName = currentSteps[callId].name; // Capture name for tool message
+                 const updatedStep = { 
+                     ...currentSteps[callId], 
+                     status: error ? 'error' : 'complete', 
+                     result: error ? null : result, 
+                     error: error ? error : null 
+                 };
+                 return {
+                     ...prev,
+                     [assistantPlaceholder.id]: { 
+                         ...currentSteps, 
+                         [callId]: updatedStep 
+                     }
+                 };
+             });
+             
+             // *** ADD the role:"tool" message to the main messages state ***
+             const toolResponseMessage = {
+                 role: "tool",
+                 id: callId, 
+                 tool_call_id: callId,
+                 name: thinkingStepName || 'unknown_tool', 
+                 content: error ? `Error: ${error}` : result 
+             };
+            
+             // Add the tool message *after* the assistant placeholder
+             setMessages(prevMessages => {
+                 const assistantIndex = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                 if (assistantIndex !== -1) {
+                     // Insert after the assistant message
+                     const newMessages = [
+                         ...prevMessages.slice(0, assistantIndex + 1),
+                         toolResponseMessage,
+                         ...prevMessages.slice(assistantIndex + 1)
+                     ];
+                     return newMessages;
+                 } else {
+                     // Fallback: Append if placeholder not found (shouldn't happen ideally)
+                     console.warn(`[onToolCallEnd] Assistant placeholder ${assistantPlaceholder.id} not found, appending tool message.`);
+                     return [...prevMessages, toolResponseMessage];
+                 }
+            });
+         });
+
+        // Handle stream completion (this receives the *final* message data)
         await new Promise((resolve, reject) => {
-            streamHandler.onComplete((data) => {
-                 console.log("[App.jsx onComplete] Received data:", JSON.stringify(data, null, 2)); // Log received data
-                // Final assistant message data is complete here
-                finalAssistantData = {
-                    role: 'assistant',
-                    content: data.content || '',
-                    tool_calls: data.tool_calls,
-                    reasoning: data.reasoning
-                };
-                turnAssistantMessage = finalAssistantData; // Store the completed message
-                
-                // Replace the placeholder with the final, non-streaming message
+            streamHandler.onComplete((finalData) => {
+                console.log("[onComplete] Final data received:", finalData);
+                let finalStateForSave;
                 setMessages(prevMessages => {
-                    // Find the index of the streaming message *in the current state*
-                    const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                    if (streamingMsgIndex !== -1) {
-                        // Create a new array replacing the placeholder with the final data
-                        const finalMessages = [...prevMessages];
-                        finalMessages[streamingMsgIndex] = finalAssistantData; // Replace with final object (isStreaming is false/undefined now)
-                        return finalMessages;
+                    const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                    let updatedMessages = prevMessages;
+                    if (idx !== -1) {
+                        const currentMsg = prevMessages[idx];
+                        const finalContentFromStream = currentMsg.finalContent || ''; 
+                        const initialContent = currentMsg.content;
+                        
+                        const finalMessage = {
+                           ...currentMsg, 
+                            finalContent: finalContentFromStream, 
+                            status: 'complete', 
+                            isStreaming: false 
+                        };
+                        updatedMessages = [
+                            ...prevMessages.slice(0, idx),
+                            finalMessage,
+                            ...prevMessages.slice(idx + 1)
+                        ];
+                    } else { 
+                        console.warn("[onComplete] Placeholder not found for final update.");
                     }
-                    // If placeholder somehow vanished, add the final message
-                    console.warn("[onComplete] Streaming placeholder not found, adding final message.");
-                    return [...prevMessages, finalAssistantData];
+                    finalStateForSave = updatedMessages; 
+                    return updatedMessages;
                 });
-                resolve();
+                setLoading(false); 
+                resolve(); 
             });
 
             streamHandler.onError(({ error }) => {
-                 // Update the UI to show the error message
-                 setMessages(prevMessages => {
-                    // Find the streaming placeholder message
-                    const streamingMsgIndex = prevMessages.findIndex(msg => msg.role === 'assistant' && msg.isStreaming);
-                    if (streamingMsgIndex !== -1) {
-                        // Replace placeholder with an error message
-                        const updatedMessages = [...prevMessages];
-                        updatedMessages[streamingMsgIndex] = {
-                            role: 'assistant',
-                            content: `Stream Error: ${error || 'Unknown streaming error'}`,
-                            isStreaming: false // Ensure streaming is off
-                        };
-                        return updatedMessages;
-                    } else {
-                        // If placeholder not found, just append the error message
-                        console.warn("[onError] Streaming placeholder not found, appending error message.");
-                        return [
-                            ...prevMessages,
-                            { role: 'assistant', content: `Stream Error: ${error || 'Unknown streaming error'}` }
-                        ];
-                    }
+                 console.error("[onError] Stream error:", error);
+                 let finalStateForSave;
+                  setMessages(prevMessages => {
+                     const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                     let updatedMessages = prevMessages;
+                     if (idx !== -1) {
+                         updatedMessages = [...prevMessages];
+                         updatedMessages[idx] = {
+                             ...updatedMessages[idx], 
+                             content: (updatedMessages[idx].content || '') + `\n\n**Stream Error:** ${error || 'Unknown streaming error'}`,
+                             status: 'error', 
+                             isStreaming: false 
+                         };
+                     } else {
+                         console.warn("[onError] Placeholder not found for error update.");
+                     }
+                     finalStateForSave = updatedMessages; 
+                     return updatedMessages; 
                  });
-                 // Reject the promise to signal the error to the calling function
+                 setThinkingSteps(prev => {
+                     // ... (clear thinking steps) ...
+                 });
+                 setLoading(false); 
                  reject(new Error(error || 'Unknown streaming error'));
             });
-        });
+
+        }); // End Promise
 
         streamHandler.cleanup();
-
-        // Process tools *after* stream completion
-        if (turnAssistantMessage && turnAssistantMessage.tool_calls?.length > 0) {
-            const { status: toolProcessingStatus, toolResponseMessages } = await processToolCalls(
-                turnAssistantMessage,
-                turnMessages 
-            );
-            turnToolResponses = toolResponseMessages;
-            currentTurnStatus = toolProcessingStatus === 'paused' ? 'paused' : 'completed_with_tools';
-            if (toolProcessingStatus === 'error') currentTurnStatus = 'error'; // Handle tool processing errors
-        } else if (turnAssistantMessage) {
-             currentTurnStatus = 'completed_no_tools';
-        } else {
-            // If turnAssistantMessage is null (e.g., stream error happened), it's an error state
-            currentTurnStatus = 'error';
-        }
+        
+        // Remove the complex logic that tried to re-run the loop after tool calls
+        // The backend now handles the two-step process.
+        // The final onComplete/onTurnComplete marks the end of the interaction.
 
     } catch (error) {
         // ... (catch block sets UI state) ...
@@ -884,6 +955,8 @@ ${part.content}` };
 
   // Handle sending message (text or structured content with images)
   const handleSendMessage = async (content) => {
+    let currentTurnStreamId = null; // Track the stream ID for this turn
+
     // Check if content is structured (array) or just text (string)
     const isStructuredContent = Array.isArray(content);
     const hasContent = isStructuredContent ? content.some(part => (part.type === 'text' && part.text.trim()) || part.type === 'image_url') : content.trim();
@@ -893,79 +966,251 @@ ${part.content}` };
     // Format the user message based on content type
     const userMessage = {
       role: 'user',
-      content: content // Assumes ChatInput now sends the correct structured format
+      // Assign a temporary unique ID to the user message if needed for linking
+      id: `user-${Date.now()}-${Math.random()}`,
+      content: content
     };
-    // Add user message optimistically BEFORE the API call
     const initialMessages = [...messages, userMessage];
-    setMessages(initialMessages); // <<< TEMP: Restore optimistic update
+    setMessages(initialMessages);
 
     setLoading(true);
 
-    let currentApiMessages = initialMessages; // Start with messages including the new user one
-    let conversationStatus = 'processing'; // Start the conversation flow
-
     try {
-        while (conversationStatus === 'processing' || conversationStatus === 'completed_with_tools') {
-            // Get the result, including the final message list for the turn
-            const { status, assistantMessage, toolResponseMessages, finalMessages: turnFinalMessages } = await executeChatTurn(currentApiMessages);
-            
-            currentApiMessages = turnFinalMessages; // Update messages for the next potential loop/save
-            conversationStatus = status; // Update status for loop condition
+        // Create a streaming assistant message placeholder with initial status
+        const assistantPlaceholder = {
+            role: 'assistant',
+            // Assign a temporary unique ID to link thinking steps
+            id: `assistant-placeholder-${Date.now()}-${Math.random()}`,
+            content: '', // Initial text
+            finalContent: '', // Text after tool calls
+            status: 'streaming_text', // Initial status
+            isStreaming: true, // Keep this flag for finding the placeholder
+            tool_calls: [] // Initialize tool_calls array
+        };
+        setMessages(prev => [...prev, assistantPlaceholder]);
+        // Initialize thinking steps for this placeholder
+        setThinkingSteps(prev => ({ ...prev, [assistantPlaceholder.id]: {} }));
 
-            if (status === 'paused') {
-                 // Pause initiated by executeChatTurn/processToolCalls
-                 break; // Exit the loop
-            } else if (status === 'error') {
-                 // Error occurred, stop the loop
-                 break;
-            } else if (status === 'completed_with_tools') {
-                 // Prepare messages for the next turn ONLY if tools were completed
-                 if (assistantMessage && toolResponseMessages.length > 0) {
-                     // Format tool responses for the API
-                     const formattedToolResponses = toolResponseMessages.map(msg => ({
-                         role: 'tool',
-                         content: msg.content, // Ensure this is a string
-                         tool_call_id: msg.tool_call_id
-                     }));
-                     // Append assistant message and tool responses for the next API call
-                     currentApiMessages = [
-                         ...currentApiMessages,
-                         { // Assistant message that included the tool calls
-                            role: assistantMessage.role,
-                            content: assistantMessage.content,
-                            tool_calls: assistantMessage.tool_calls
-                         },
-                         ...formattedToolResponses
-                     ];
-                     // Loop continues as conversationStatus is 'completed_with_tools'
-                 } else {
-                     // Should not happen if status is completed_with_tools, but safety break
-                     console.warn("Status 'completed_with_tools' but no assistant message or tool responses found.");
-                     conversationStatus = 'error'; // Treat as error
-                     break;
+        // Start streaming chat
+        // NOTE: We pass the messages *before* adding the placeholder, 
+        // as the backend handles the history.
+        const streamHandler = window.electron.startChatStream(initialMessages, selectedModel);
+
+        // Setup event handlers for streaming
+        streamHandler.onStart((startData) => { 
+            currentTurnStreamId = startData.id; // Capture the stream ID
+            console.log("[onStart] Stream started:", startData);
+        });
+
+        // Listen for signal that the *final* response stream is starting
+        streamHandler.onFinalStart(({ id }) => {
+            console.log(`[onFinalStart] Final stream starting for ID: ${id}`);
+            setMessages(prev => prev.map(msg => 
+                msg.id === assistantPlaceholder.id ? { ...msg, status: 'streaming_final_response' } : msg
+            ));
+        });
+
+        streamHandler.onContent(({ content }) => {
+            setMessages(prevMessages => {
+                const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                if (idx !== -1) {
+                    const updatedMessages = [...prevMessages];
+                    const currentMsg = updatedMessages[idx];
+                    // Append to correct content field based on status
+                    if (currentMsg.status === 'streaming_final_response') {
+                         updatedMessages[idx] = {
+                            ...currentMsg,
+                            finalContent: (currentMsg.finalContent || '') + content
+                        };
+                    } else { // Assumed streaming_text or processing_tools
+                         updatedMessages[idx] = {
+                            ...currentMsg,
+                            content: (currentMsg.content || '') + content
+                        };
+                    }
+                    return updatedMessages;
+                }
+                return prevMessages;
+            });
+        });
+        
+        // Capture tool calls associated with the assistant message
+        streamHandler.onToolCalls(({ tool_calls }) => {
+            console.log("[onToolCalls] Received tool calls:", tool_calls);
+            setMessages(prev => prev.map(msg => 
+                msg.id === assistantPlaceholder.id ? { ...msg, tool_calls: tool_calls } : msg
+            ));
+        });
+
+        // *** NEW: Handle Tool Call Start ***
+        streamHandler.onToolCallStart(({ callId, name, args }) => {
+             console.log(`[onToolCallStart] Tool: ${name}, ID: ${callId}, Args:`, args);
+             // Ensure we update the correct message (identified by placeholder ID)
+             setMessages(prev => prev.map(msg => 
+                 msg.id === assistantPlaceholder.id ? { ...msg, status: 'processing_tools' } : msg
+             ));
+             setThinkingSteps(prev => ({
+                 ...prev,
+                 [assistantPlaceholder.id]: {
+                     ...(prev[assistantPlaceholder.id] || {}),
+                     // Store full details for this specific tool call
+                     [callId]: { name, args, status: 'executing', result: null, error: null } 
                  }
-            } else if (status === 'completed_no_tools') {
-                 // Conversation turn finished without tools, stop the loop
-                 break;
-            }
-        } // End while loop
+             }));
+         });
+
+        // *** NEW: Handle Tool Call End ***
+        streamHandler.onToolCallEnd(({ callId, name, result, error }) => {
+             console.log(`[onToolCallEnd] ID: ${callId}, Error: ${!!error}, Result:`, result);
+             // Update thinking steps state
+             let thinkingStepName = 'unknown_tool'; // Default name
+             setThinkingSteps(prev => {
+                 const currentSteps = prev[assistantPlaceholder.id] || {};
+                 if (!currentSteps[callId]) {
+                     console.warn(`[onToolCallEnd] Thinking step for callId ${callId} not found.`);
+                     currentSteps[callId] = { name: name || 'unknown_tool', args: {}, status: 'executing' }; 
+                 }
+                 thinkingStepName = currentSteps[callId].name; // Capture name for tool message
+                 const updatedStep = { 
+                     ...currentSteps[callId], 
+                     status: error ? 'error' : 'complete', 
+                     result: error ? null : result, 
+                     error: error ? error : null 
+                 };
+                 return {
+                     ...prev,
+                     [assistantPlaceholder.id]: { 
+                         ...currentSteps, 
+                         [callId]: updatedStep 
+                     }
+                 };
+             });
+             
+             // *** ADD the role:"tool" message to the main messages state ***
+             const toolResponseMessage = {
+                 role: "tool",
+                 id: callId, 
+                 tool_call_id: callId,
+                 name: thinkingStepName || 'unknown_tool', 
+                 content: error ? `Error: ${error}` : result 
+             };
+            
+             // Add the tool message *after* the assistant placeholder
+             setMessages(prevMessages => {
+                 const assistantIndex = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                 if (assistantIndex !== -1) {
+                     // Insert after the assistant message
+                     const newMessages = [
+                         ...prevMessages.slice(0, assistantIndex + 1),
+                         toolResponseMessage,
+                         ...prevMessages.slice(assistantIndex + 1)
+                     ];
+                     return newMessages;
+                 } else {
+                     // Fallback: Append if placeholder not found (shouldn't happen ideally)
+                     console.warn(`[onToolCallEnd] Assistant placeholder ${assistantPlaceholder.id} not found, appending tool message.`);
+                     return [...prevMessages, toolResponseMessage];
+                 }
+            });
+         });
+
+        // Handle stream completion (this receives the *final* message data)
+        await new Promise((resolve, reject) => {
+            streamHandler.onComplete((finalData) => {
+                console.log("[onComplete] Final data received:", finalData);
+                let finalStateForSave;
+                setMessages(prevMessages => {
+                    const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                    let updatedMessages = prevMessages;
+                    if (idx !== -1) {
+                        const currentMsg = prevMessages[idx];
+                        const finalContentFromStream = currentMsg.finalContent || ''; 
+                        const initialContent = currentMsg.content;
+                        
+                        const finalMessage = {
+                           ...currentMsg, 
+                            finalContent: finalContentFromStream, 
+                            status: 'complete', 
+                            isStreaming: false 
+                        };
+                        updatedMessages = [
+                            ...prevMessages.slice(0, idx),
+                            finalMessage,
+                            ...prevMessages.slice(idx + 1)
+                        ];
+                    } else { 
+                        console.warn("[onComplete] Placeholder not found for final update.");
+                    }
+                    finalStateForSave = updatedMessages; 
+                    return updatedMessages;
+                });
+                setLoading(false); 
+                resolve(); 
+            });
+
+            streamHandler.onError(({ error }) => {
+                 console.error("[onError] Stream error:", error);
+                 let finalStateForSave;
+                  setMessages(prevMessages => {
+                     const idx = prevMessages.findIndex(msg => msg.id === assistantPlaceholder.id);
+                     let updatedMessages = prevMessages;
+                     if (idx !== -1) {
+                         updatedMessages = [...prevMessages];
+                         updatedMessages[idx] = {
+                             ...updatedMessages[idx], 
+                             content: (updatedMessages[idx].content || '') + `\n\n**Stream Error:** ${error || 'Unknown streaming error'}`,
+                             status: 'error', 
+                             isStreaming: false 
+                         };
+                     } else {
+                         console.warn("[onError] Placeholder not found for error update.");
+                     }
+                     finalStateForSave = updatedMessages; 
+                     return updatedMessages; 
+                 });
+                 setThinkingSteps(prev => {
+                     // ... (clear thinking steps) ...
+                 });
+                 setLoading(false); 
+                 reject(new Error(error || 'Unknown streaming error'));
+            });
+
+        }); // End Promise
+
+        streamHandler.cleanup();
+        
+        // Remove the complex logic that tried to re-run the loop after tool calls
+        // The backend now handles the two-step process.
+        // The final onComplete/onTurnComplete marks the end of the interaction.
 
     } catch (error) {
-        // Catch errors originating directly in handleSendMessage loop (unlikely with refactor)
-        console.error('Error in handleSendMessage conversation flow:', error);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${error.message}` }]);
-        conversationStatus = 'error'; // Ensure loading state is handled
+        console.error('Error in handleSendMessage streaming:', error);
+        // Error handling within the stream listeners should cover most cases
+        // But add a fallback here
+         setMessages(prev => {
+             // Try to find placeholder and mark error, or add new error message
+             const idx = prev.findIndex(msg => msg.id === assistantPlaceholder?.id);
+             if (idx !== -1) {
+                 const updated = [...prev];
+                 updated[idx] = { ...updated[idx], status: 'error', isStreaming: false, content: (updated[idx].content || '') + `\n\n**Error:** ${error.message}` };
+                 return updated;
+             } else {
+                 return [...prev, { role: 'assistant', content: `Error: ${error.message}`, status: 'error' }];
+             }
+         });
+         // Clear thinking steps on outer error
+         if (assistantPlaceholder?.id) {
+             setThinkingSteps(prev => {
+                 const newState = { ...prev };
+                 delete newState[assistantPlaceholder.id];
+                 return newState;
+             });
+         }
+         setLoading(false); // Ensure loading stops on outer catch
     } finally {
-        console.log(`[handleSendMessage] Finally block. Status: ${conversationStatus}`);
-        // Only set loading false if the conversation is not paused
-        if (conversationStatus !== 'paused') {
-            setLoading(false);
-            // --- Task 12: Save chat after successful turn completion ---
-            // Use the final messages returned from the last successful turn
-            console.log(`[handleSendMessage] Conversation complete. Calling saveCurrentChat. Messages Length: ${currentApiMessages?.length}`);
-            saveCurrentChat(currentApiMessages); // Pass the definitive final messages
-            // --- End Task 12 --- 
-        }
+        // setLoading(false); // Moved to onTurnComplete or onError
+        // saveCurrentChat(?); // Consider saving based on successful onTurnComplete
+        console.log("[handleSendMessage] Finally block reached.");
     }
   };
 
@@ -1063,7 +1308,7 @@ ${part.content}` };
                  setLoading(false);
                  // --- Task 12 (Revised): Save chat after successful resume/completion ---
                  console.log(`[resumeChatFlow] Resumed turn completed. Status: ${nextTurnStatus}. Calling saveCurrentChat.`);
-                 saveCurrentChat(finalMessagesAfterResume); // Save the definitive final list
+                 saveCurrentChat(finalMessagesAfterResume, activeChatId); // Save the definitive final list
                  // --- End Task 12 --- 
              } else {
                 // It paused again, do not set loading false
@@ -1213,6 +1458,36 @@ ${part.content}` };
   // --- Calculate derived state --- //
   const isVisionSupported = allPlatformModels[selectedPlatform]?.[selectedModel]?.vision_supported || false;
   const currentModelInfo = allPlatformModels[selectedPlatform]?.[selectedModel] || null;
+
+  // Effect to save chat when a turn completes
+  useEffect(() => {
+    if (!initialLoadComplete || !messages || messages.length === 0) return;
+
+    // Find the *latest* assistant message that is complete or errored
+    let messageToSave = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === 'assistant' && (msg.status === 'complete' || msg.status === 'error')) {
+            // Check if this completed message ID is different from the last one saved
+             if (msg.id && msg.id !== lastSavedMessageId) {
+                 messageToSave = msg; 
+             } 
+             // Stop searching once we find the latest completed/errored assistant message
+             break; 
+        }
+    }
+
+    //console.log(`[useEffect Save Check] Found message to potentially save: ${messageToSave?.id}, lastSaved: ${lastSavedMessageId}, activeChatId: ${activeChatId}`);
+
+    // If we found a completed assistant message that hasn't been saved
+    if (messageToSave) {
+        console.log(`[useEffect Save] Conditions MET for message ${messageToSave.id}. Calling saveCurrentChat with current activeChatId: ${activeChatId}`);
+        // Pass the current messages state and activeChatId to the save function
+        saveCurrentChat(messages, activeChatId); 
+        // Update the tracker immediately *after* initiating the save
+        setLastSavedMessageId(messageToSave.id);
+    }
+  }, [messages, activeChatId, lastSavedMessageId, initialLoadComplete, saveCurrentChat]);
 
   return (
     <div className="flex flex-row h-screen bg-gray-900">

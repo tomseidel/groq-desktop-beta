@@ -1,6 +1,7 @@
 const https = require('https'); // Use standard HTTPS module
 const { get_encoding } = require("@dqbd/tiktoken");
 const { extractTextFromFile } = require('./fileExtractor'); // Import the extractor
+const { handleExecuteToolCall } = require('./toolHandler'); // Import tool executor
 
 // --- Token Counting & Context Fitting Logic (Moved from messageUtils.js) ---
 // Using cl100k_base as a general default suitable for gpt-4, gpt-3.5-turbo, text-embedding-ada-002, etc.
@@ -20,44 +21,53 @@ function countTokens(text) {
 }
 
 /**
- * Estimates the total tokens for an array of message objects.
+ * Estimates the total tokens for an array of message objects, updated for tool calls.
  */
 function countTokensForMessages(messages, modelId = 'gpt-4') {
     let num_tokens = 0;
     messages.forEach(message => {
-        num_tokens += 4; // every message follows <im_start>{role/name}\n{content}<im_end>\n
+        // Base cost per message
+        num_tokens += 4; 
+
         Object.entries(message).forEach(([key, value]) => {
+            // Count tokens for common string values like role, name, tool_call_id
+            if (typeof value === 'string') {
+                num_tokens += countTokens(value);
+            }
+
+            // Specific handling for content
             if (key === 'content') {
                 if (typeof value === 'string') {
-                    num_tokens += countTokens(value);
-                } else if (Array.isArray(value)) {
+                    // Already counted above if string
+                } else if (Array.isArray(value)) { // User message content parts
                     value.forEach(part => {
                         if (part.type === 'text') {
-                             num_tokens += countTokens(part.text);
+                             num_tokens += countTokens(part.text || '');
                         } else if (part.type === 'image_url') {
-                            // Placeholder fixed cost for images
-                            num_tokens += 85; 
-                        }
+                            num_tokens += 85; // Placeholder cost for images
+                        } 
+                        // Ignore file_content/file_error here as they were converted to text parts earlier
                     });
-                }
-            } else if (key === 'tool_calls' && Array.isArray(value)) {
+                } // Null content (assistant message with only tool calls) contributes 0 tokens
+            } 
+            // Specific handling for assistant tool calls
+            else if (key === 'tool_calls' && message.role === 'assistant' && Array.isArray(value)) {
                  value.forEach(toolCall => {
                     if (toolCall.function) {
-                        num_tokens += countTokens(toolCall.function.name || '');
+                        // Count function name and arguments (already counted if string via loop above, need name explicitly)
+                        num_tokens += countTokens(toolCall.function.name || ''); 
                         num_tokens += countTokens(toolCall.function.arguments || '');
                     }
                  });
-            } else if (key === 'name') { 
-                num_tokens -= 1; 
-                num_tokens += countTokens(value);
-            } else if (key !== 'role'){ 
-                if (typeof value === 'string') {
-                     num_tokens += countTokens(value);
-                }
             }
         });
+
+        // Adjust for name/tool_call_id overhead (-1 token adjustment)
+        if (message.name || message.tool_call_id) {
+            num_tokens -= 1; // If name or tool_call_id is present, it replaces role, save 1 token
+        }
     });
-    num_tokens += 2; // every reply is primed with <im_start>assistant
+    num_tokens += 2; // Every reply is primed with <|im_start|>assistant
     return num_tokens;
 }
 
@@ -106,10 +116,16 @@ function ensureContextFits(messages, contextLimit, modelId = 'gpt-4', safetyBuff
  * @param {object} platformModels - Object containing fetched models for each platform { groq: {...}, openrouter: {...} }.
  * @param {Array<object>} discoveredTools - List of available MCP tools.
  * @param {string} selectedPlatform - The selected platform ('groq' or 'openrouter'). Passed explicitly.
+ * @param {object} mcpClients - Object mapping server IDs to active MCP client instances.
  */
-async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools, selectedPlatform) {
+async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools, selectedPlatform, mcpClients) {
     // Assume selectedPlatform is passed in now, along with settings containing relevant API keys.
     console.log(`Handling chat-stream request. Platform: ${selectedPlatform}, Model: ${model || 'using settings'}, Messages: ${messages?.length}`);
+
+    // State for the current turn, including tool call handling
+    let accumulatedContent = ""; // Text content from the model
+    let pendingToolCalls = []; // Array to assemble tool calls as chunks arrive
+    let processedToolResults = []; // Array to store results from executed tools
 
     try {
         let apiKey;
@@ -352,66 +368,51 @@ ${part.content}` }; // Ensure content is included
 
             res.setEncoding('utf8');
             let buffer = '';
-            let accumulatedContent = "";
-            let accumulatedToolCalls = [];
+            let finalFinishReason = null; // Capture the finish reason
+            let capturedModel = null; // Capture the model used
             let accumulatedReasoning = null; // Store reasoning if applicable
             let isFirstChunk = true;
             let streamId = `stream_${Date.now()}`; // Generate a simple ID
-            let generationId = null; // Keep for potential future use, but not for usage query
+            let generationId = null;
 
             res.on('data', (chunk) => {
-                if (requestAborted) return; // Stop processing if already completed or aborted
+                if (requestAborted) return;
                 buffer += chunk;
-                let finalUsage = null; // Variable to capture usage from the final chunk
-                // Process buffer line by line for SSE messages
                 let boundary = buffer.indexOf('\n\n');
                 while (boundary !== -1) {
                     const message = buffer.substring(0, boundary);
-                    buffer = buffer.substring(boundary + 2); // Skip the \n\n
+                    buffer = buffer.substring(boundary + 2);
                     boundary = buffer.indexOf('\n\n');
 
                     if (message.startsWith('data: ')) {
-                        const dataContent = message.substring(6).trim(); // Skip 'data: '
-                        console.log("[RAW STREAM DATA]:", dataContent); // Log raw data content
-                        
+                        const dataContent = message.substring(6).trim();
+                        console.log("[RAW STREAM DATA]:", dataContent);
+
                         if (dataContent === '[DONE]') {
-                            // Stream finished signal
-                            console.log(`Stream completed via [DONE]. Reason: ${accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop'}, ID: ${streamId}`);
-                            if (!requestAborted) {
-                                requestAborted = true;
-                                event.sender.send('chat-stream-complete', {
-                                    id: streamId, // Use generated ID
-                                    content: accumulatedContent,
-                                    role: "assistant",
-                                    tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
-                                    reasoning: accumulatedReasoning,
-                                    finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop', // Infer finish reason
-                                    //usage: finalUsage // <<< REMOVE usage
-                                });
-                            }
-                            return; // Stop processing further data chunks
+                            // Mark as done, final processing happens in res.on('end')
+                            console.log(`[DONE] received for stream ${streamId}. Final processing in 'end' handler.`);
+                            // We don't set requestAborted here, let 'end' handle final state
+                            return; 
                         }
 
                         try {
                             const jsonChunk = JSON.parse(dataContent);
+                            capturedModel = jsonChunk.model || capturedModel; // Capture model name
 
-                            // --- Process OpenAI formatted chunk ---
                             if (jsonChunk.choices && jsonChunk.choices.length > 0) {
                                 const choice = jsonChunk.choices[0];
                                 const delta = choice.delta;
 
                                 if (isFirstChunk) {
-                                    streamId = jsonChunk.id || streamId; // Capture actual stream ID if available
-                                    // --- Capture Generation ID ---
+                                    streamId = jsonChunk.id || streamId; 
                                     if (streamId.startsWith('gen-')) {
                                         generationId = streamId;
                                         console.log(`Captured Generation ID: ${generationId}`);
                                     }
-                                    // ---
                                     event.sender.send('chat-stream-start', {
                                         id: streamId,
                                         role: delta?.role || "assistant",
-                                        model: jsonChunk.model, // Send model used back
+                                        model: capturedModel,
                                     });
                                     isFirstChunk = false;
                                 }
@@ -422,96 +423,291 @@ ${part.content}` }; // Ensure content is included
                                 }
 
                                 if (delta?.tool_calls && delta.tool_calls.length > 0) {
-                                    // Reuse existing logic for accumulating tool calls
                                     for (const toolCallDelta of delta.tool_calls) {
-                                         let existingCall = accumulatedToolCalls.find(tc => tc.index === toolCallDelta.index);
-                                         if (!existingCall && toolCallDelta.index !== undefined) { // Need index to track
-                                             accumulatedToolCalls.push({
-                                                 index: toolCallDelta.index,
-                                                 id: toolCallDelta.id || null, // ID might come later
-                                                 type: toolCallDelta.type || 'function',
-                                                 function: {
-                                                     name: toolCallDelta.function?.name || "",
-                                                     arguments: toolCallDelta.function?.arguments || ""
-                                                 }
-                                             });
-                                             existingCall = accumulatedToolCalls[accumulatedToolCalls.length - 1];
-                                         } else if (existingCall) {
-                                             // Update existing call
-                                             if (toolCallDelta.id) existingCall.id = toolCallDelta.id;
-                                             // Name usually comes all at once, replace is safer than append
-                                             if (toolCallDelta.function?.name) existingCall.function.name = toolCallDelta.function.name;
-                                             if (toolCallDelta.function?.arguments) existingCall.function.arguments += toolCallDelta.function.arguments; // Append arguments
-                                         } else {
-                                             console.warn("Received tool call delta without index or matching existing call:", toolCallDelta);
-                                         }
+                                        let existingCall = pendingToolCalls.find(tc => tc.index === toolCallDelta.index);
+                                        if (!existingCall && toolCallDelta.index !== undefined) {
+                                            pendingToolCalls.push({
+                                                index: toolCallDelta.index,
+                                                id: toolCallDelta.id || null,
+                                                type: toolCallDelta.type || 'function',
+                                                function: {
+                                                    name: toolCallDelta.function?.name || "",
+                                                    arguments: toolCallDelta.function?.arguments || ""
+                                                }
+                                            });
+                                        } else if (existingCall) {
+                                            if (toolCallDelta.id) existingCall.id = toolCallDelta.id;
+                                            if (toolCallDelta.function?.name) existingCall.function.name = toolCallDelta.function.name;
+                                            if (toolCallDelta.function?.arguments) existingCall.function.arguments += toolCallDelta.function.arguments;
+                                        } else {
+                                            console.warn("Received tool call delta without index or matching existing call:", toolCallDelta);
+                                        }
                                     }
-                                     // Send update with potentially partial tool calls (remove index before sending)
-                                     const sanitizedToolCalls = accumulatedToolCalls.map(tc => ({ ...tc, index: undefined }));
-                                     event.sender.send('chat-stream-tool-calls', { id: streamId, tool_calls: sanitizedToolCalls });
+                                    const sanitizedToolCalls = JSON.parse(JSON.stringify(pendingToolCalls)).map(tc => { delete tc.index; return tc; });
+                                    event.sender.send('chat-stream-tool-calls', { id: streamId, tool_calls: sanitizedToolCalls });
                                 }
 
                                 if (choice.finish_reason) {
-                                    console.log(`Stream completed via finish_reason. Reason: ${choice.finish_reason}, ID: ${streamId}`);
-                                    if (!requestAborted) {
-                                        requestAborted = true;
-                                        // Map Groq finish reasons if needed, e.g., 'tool_calls' might come from Groq
-                                        const finalFinishReason = choice.finish_reason === 'tool_calls' ? 'tool_calls' : choice.finish_reason;
-
-                                        // Ensure final tool call IDs are captured if they arrive with finish reason
-                                         if (delta?.tool_calls) {
-                                             // Process potential final updates to tool calls here if needed (e.g., ensure IDs are set)
-                                             delta.tool_calls.forEach(finalDelta => {
-                                                const call = accumulatedToolCalls.find(tc => tc.index === finalDelta.index);
-                                                if(call && finalDelta.id) call.id = finalDelta.id;
-                                             });
-                                         }
-                                         const finalSanitizedToolCalls = accumulatedToolCalls.map(tc => ({ ...tc, index: undefined }));
-
-                                        // --- Log before sending complete event (NO Usage) ---
-                                        console.log(`[chatHandler] Sending chat-stream-complete. Usage: null (will be estimated on frontend)`);
-                                        // --- End Log ---
-                                        
-                                        event.sender.send('chat-stream-complete', {
-                                            id: streamId,
-                                            content: accumulatedContent,
-                                            role: "assistant",
-                                            tool_calls: finalSanitizedToolCalls.length > 0 ? finalSanitizedToolCalls : undefined,
-                                            reasoning: accumulatedReasoning,
-                                            finish_reason: finalFinishReason,
-                                            //usage: finalUsage // <<< REMOVE usage
+                                    finalFinishReason = choice.finish_reason; // Capture finish reason
+                                    console.log(`Captured finish_reason: ${finalFinishReason} for stream ${streamId}`);
+                                    // Ensure final tool call IDs are updated if they arrive with finish reason
+                                    if (delta?.tool_calls) {
+                                        delta.tool_calls.forEach(finalDelta => {
+                                           const call = pendingToolCalls.find(tc => tc.index === finalDelta.index);
+                                           if(call && finalDelta.id) call.id = finalDelta.id;
                                         });
                                     }
-                                    return; // Stop processing
+                                    // Don't return yet, let res.on('end') handle completion
                                 }
                             }
-                            // --- End Process OpenAI formatted chunk ---
-
                         } catch (parseError) {
                             console.error('Error parsing SSE data chunk:', parseError, 'Data:', dataContent);
-                            // Decide if this is fatal or ignorable noise
                         }
                     }
-                } // end while loop for processing buffer
-            }); // end res.on('data')
+                } 
+            }); 
 
             res.on('end', async () => { 
-                if (!requestAborted) { 
-                     console.warn('Stream ended unexpectedly without [DONE] message or finish_reason.');
-                     requestAborted = true;
- 
-                     // Send completion with whatever was accumulated, maybe with 'length' finish reason?
-                     console.log(`[chatHandler] Sending chat-stream-complete (unexpected end). Usage: null`);
- 
-                     event.sender.send('chat-stream-complete', {
-                          id: streamId,
-                          content: accumulatedContent,
-                          role: "assistant",
-                          tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls.map(tc => ({ ...tc, index: undefined })) : undefined,
-                          reasoning: accumulatedReasoning,
-                          finish_reason: 'length', // Indicate truncation or unexpected end
-                          //usage: finalUsage // <<< REMOVE usage
-                      });
+                console.log(`Stream ${streamId} ended.`);
+                if (requestAborted) return; // Already handled (e.g., error)
+                requestAborted = true; // Mark as handled
+
+                // Determine final reason if not explicitly captured
+                if (!finalFinishReason) {
+                    if (pendingToolCalls.length > 0) {
+                        console.warn(`Stream ${streamId} ended without explicit finish_reason, inferring 'tool_calls'.`);
+                        finalFinishReason = 'tool_calls';
+                    } else {
+                        console.warn(`Stream ${streamId} ended without explicit finish_reason, inferring 'stop'.`);
+                        finalFinishReason = 'stop'; // Or 'length'? Defaulting to 'stop'
+                    }
+                }
+
+                // --- TOOL CALL EXECUTION LOGIC --- 
+                if (finalFinishReason === 'tool_calls' && pendingToolCalls.length > 0) {
+                    console.log(`Executing ${pendingToolCalls.length} tool calls for stream ${streamId}...`);
+
+                    // 1. Finalize Tool Calls (ensure args are valid JSON, IDs are present)
+                    const finalizedToolCalls = [];
+                    let parsingError = false;
+                    for (const call of pendingToolCalls) {
+                        if (!call.id) {
+                             console.error(`Tool call at index ${call.index} missing final ID.`);
+                             // Assign a placeholder or skip? For now, skip and report error later?
+                             // Potentially send error back to renderer?
+                             parsingError = true;
+                             break; // Stop processing tools if one is broken
+                        }
+                        try {
+                            JSON.parse(call.function.arguments || '{}'); // Validate JSON
+                            // Add the finalized call (without index) to list for assistant message
+                            finalizedToolCalls.push({
+                                id: call.id,
+                                type: call.type,
+                                function: {
+                                    name: call.function.name,
+                                    arguments: call.function.arguments
+                                }
+                            });
+                        } catch (e) {
+                            console.error(`Invalid JSON arguments for tool ${call.function.name} (ID: ${call.id}): ${e.message}`);
+                            parsingError = true;
+                            // Send error back? For now, stop processing.
+                            event.sender.send('chat-stream-error', { error: `Model generated invalid arguments for tool ${call.function.name}.` });
+                            break;
+                        }
+                    }
+
+                    if (parsingError) {
+                        console.error("Aborting tool execution due to parsing errors.");
+                        return; // Stop if any tool call is invalid
+                    }
+
+                    // 2. Create initial assistant message history entry
+                    const initialAssistantMessage = {
+                        role: "assistant",
+                        content: accumulatedContent || null, // Content can be null if only tool calls
+                        tool_calls: finalizedToolCalls
+                    };
+                    let currentMessageHistory = [...messagesForApi, initialAssistantMessage]; // Start building history for the *next* call
+
+                    // 3. Execute tools sequentially and collect results
+                    processedToolResults = []; // Clear previous results if any
+                    for (const toolToExecute of finalizedToolCalls) {
+                        console.log(`Executing tool: ${toolToExecute.function.name} (ID: ${toolToExecute.id})`);
+                        try {
+                            // Send start notification to frontend
+                             event.sender.send('tool-call-start', { 
+                                callId: toolToExecute.id, 
+                                name: toolToExecute.function.name, 
+                                args: JSON.parse(toolToExecute.function.arguments || '{}') // Send parsed args 
+                            });
+
+                            const toolResult = await handleExecuteToolCall(
+                                event, // Pass event for potential IPC within handler?
+                                toolToExecute, 
+                                discoveredTools,
+                                mcpClients // Pass the mcpClients object
+                            );
+
+                             // Send end notification to frontend
+                            event.sender.send('tool-call-end', { 
+                                callId: toolToExecute.id, 
+                                result: toolResult.result, // Assuming result has { result: ..., tool_call_id: ...} or { error: ..., tool_call_id: ...}
+                                error: toolResult.error 
+                            });
+
+                            // Format tool result message
+                            const toolResponseMessage = {
+                                role: "tool",
+                                tool_call_id: toolToExecute.id,
+                                name: toolToExecute.function.name,
+                                content: toolResult.error ? `Error: ${toolResult.error}` : toolResult.result // Content is the stringified result or error
+                            };
+                            processedToolResults.push(toolResponseMessage);
+                            currentMessageHistory.push(toolResponseMessage);
+                        } catch (execError) {
+                            console.error(`Unexpected error during tool execution flow for ${toolToExecute.function.name}:`, execError);
+                            // Send error notification to frontend
+                             event.sender.send('tool-call-end', { 
+                                callId: toolToExecute.id, 
+                                error: `Unexpected handler error: ${execError.message}` 
+                            });
+                            // Add an error message to history
+                            const errorToolMessage = {
+                                role: "tool",
+                                tool_call_id: toolToExecute.id,
+                                name: toolToExecute.function.name,
+                                content: `[Internal Handler Error executing tool: ${execError.message}]`
+                            };
+                             processedToolResults.push(errorToolMessage);
+                             currentMessageHistory.push(errorToolMessage);
+                             // Potentially stop further execution?
+                        }
+                    }
+
+                    // 4. Make the second API call
+                    console.log(`Making second API call with ${currentMessageHistory.length} messages...`);
+
+                    // Ensure the history for the second call is within context limits *again*
+                    const secondCallHistory = ensureContextFits(currentMessageHistory, contextLimit, modelToUse);
+
+                    const secondApiRequestBody = {
+                        messages: secondCallHistory, // Use updated history
+                        model: modelToUse,
+                        temperature: settings.temperature ?? 0.7,
+                        top_p: settings.top_p ?? 0.95,
+                        // No tools/tool_choice in the second call, we expect text
+                        stream: true,
+                        ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
+                    };
+
+                    // --- Make the second HTTPS request --- 
+                    const secondReq = https.request({
+                        hostname: apiHostname,
+                        path: apiPath,
+                        method: 'POST',
+                        headers: { /* ... same headers as before ... */ 
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${apiKey}`,
+                            'Accept': 'text/event-stream', 
+                            'Connection': 'keep-alive',
+                            ...(selectedPlatform === 'openrouter' && { 
+                                'HTTP-Referer': settings.openrouterReferrer || 'https://github.com/YourApp/GroqDesktop',
+                                'X-Title': settings.openrouterTitle || 'Groq Desktop (Electron)'
+                            })
+                        }
+                    }, (secondRes) => {
+                        console.log(`Second API Response Status: ${secondRes.statusCode}`);
+                        if (secondRes.statusCode !== 200) {
+                             let errorBody = '';
+                             secondRes.on('data', (chunk) => errorBody += chunk);
+                             secondRes.on('end', () => {
+                                console.error(`Second API Error (${secondRes.statusCode}):`, errorBody);
+                                event.sender.send('chat-stream-error', { error: `Second API call failed: ${errorBody || secondRes.statusCode}` });
+                                // event.sender.send('turn-complete', { streamId: streamId }); // REMOVED
+                            });
+                             return;
+                        }
+                        
+                        // *** Send final stream start signal ***
+                        event.sender.send('chat-stream-final-start', { id: streamId });
+
+                        secondRes.setEncoding('utf8');
+                        let secondBuffer = '';
+                        let secondAccumulatedContent = '';
+                        let secondFinalReason = null;
+
+                        secondRes.on('data', (chunk) => {
+                            secondBuffer += chunk;
+                            let b = secondBuffer.indexOf('\n\n');
+                            while (b !== -1) {
+                                const msg = secondBuffer.substring(0, b);
+                                secondBuffer = secondBuffer.substring(b + 2);
+                                b = secondBuffer.indexOf('\n\n');
+                                if (msg.startsWith('data: ')) {
+                                    const data = msg.substring(6).trim();
+                                    if (data === '[DONE]') {
+                                        secondFinalReason = 'stop'; // Assume stop if DONE
+                                        return;
+                                    }
+                                    try {
+                                        const json = JSON.parse(data);
+                                        if (json.choices && json.choices[0]?.delta?.content) {
+                                            const contentChunk = json.choices[0].delta.content;
+                                            secondAccumulatedContent += contentChunk;
+                                            // Send final content chunk to frontend
+                                            event.sender.send('chat-stream-content', { id: streamId, content: contentChunk }); 
+                                        }
+                                        if (json.choices && json.choices[0]?.finish_reason) {
+                                            secondFinalReason = json.choices[0].finish_reason;
+                                        }
+                                    } catch (e) { /* ignore parsing errors on second stream? */ }
+                                }
+                            }
+                        });
+
+                        secondRes.on('end', () => {
+                            console.log(`Second stream ${streamId} ended. Reason: ${secondFinalReason || 'inferred stop'}`);
+                            // Send the *final* completion signal for the turn
+                             event.sender.send('chat-stream-complete', {
+                                id: streamId,
+                                content: secondAccumulatedContent, // Content from the second call
+                                role: "assistant",
+                                tool_calls: undefined, // No tool calls in the final response
+                                finish_reason: secondFinalReason || 'stop',
+                            });
+                            // event.sender.send('turn-complete'); // REMOVED
+                        });
+                        secondRes.on('error', (e) => { 
+                            console.error('Error during second response streaming:', e);
+                            event.sender.send('chat-stream-error', { error: `Network error during second stream: ${e.message}` });
+                            // Send turn-complete even if the second stream errors
+                            // event.sender.send('turn-complete', { streamId: streamId }); // REMOVED
+                        });
+                    });
+                    secondReq.on('error', (e) => { 
+                        console.error('Error making second HTTPS request:', e);
+                         event.sender.send('chat-stream-error', { error: `Failed to make second API call: ${e.message}` });
+                         // Send turn-complete if the second request fails to even start
+                         // event.sender.send('turn-complete', { streamId: streamId }); // REMOVED
+                    });
+                    secondReq.write(JSON.stringify(secondApiRequestBody));
+                    secondReq.end();
+                    // --- End second HTTPS request --- 
+
+                } else {
+                    // --- NO TOOL CALLS - Just complete the first stream --- 
+                    console.log(`Completing stream ${streamId} normally (no tool calls). Reason: ${finalFinishReason}`);
+                    event.sender.send('chat-stream-complete', {
+                        id: streamId,
+                        content: accumulatedContent,
+                        role: "assistant",
+                        tool_calls: undefined, // No tool calls
+                        finish_reason: finalFinishReason,
+                    });
+                    // Send turn-complete for non-tool-call turns
+                    // event.sender.send('turn-complete', { streamId: streamId }); // REMOVED
                 }
             });
 

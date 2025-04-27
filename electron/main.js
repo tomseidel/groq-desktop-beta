@@ -285,10 +285,11 @@ app.whenReady().then(async () => {
   // Chat completion with streaming - uses chatHandler
   ipcMain.on('chat-stream', async (event, messages, model) => {
     const currentSettings = loadSettings(); // Get current settings from settingsManager
-    const { discoveredTools } = getMcpState(); // Get current tools from mcpManager
-    // Pass the selected platform from settings to the handler
+    const { discoveredTools, mcpClients } = getMcpState(); // Get current state from mcpManager
     const selectedPlatform = currentSettings.selectedPlatform || 'groq'; // Default to groq if not set
-    chatHandler.handleChatStream(event, messages, model, currentSettings, platformModels, discoveredTools, selectedPlatform);
+    
+    // Pass mcpClients to the handler
+    chatHandler.handleChatStream(event, messages, model, currentSettings, platformModels, discoveredTools, selectedPlatform, mcpClients);
   });
 
   // Handler for executing tool calls - uses toolHandler

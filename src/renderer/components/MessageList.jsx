@@ -84,15 +84,14 @@ function MessageList({ messages = [], onToolCallExecute, onRemoveLastMessage }) 
     );
   }
 
-  // We still filter tool messages here because the `Message` component handles displaying
-  // assistant messages and their corresponding tool calls/results.
+  // Filter tool messages before rendering - They are displayed within the assistant message's thinking steps
   const displayMessages = messages.filter(message => message.role !== 'tool');
 
   return (
     <div className="space-y-2 pt-4">
       {displayMessages.map((message, index) => (
         <Message 
-          key={index} 
+          key={message.id || index}
           message={message} 
           onToolCallExecute={onToolCallExecute}
           allMessages={messages} // Pass all messages for the Message component to find tool results
@@ -140,7 +139,7 @@ function MessageList({ messages = [], onToolCallExecute, onRemoveLastMessage }) 
                       const isFileContent = textContent.startsWith(fileContentPrefix);
                       const isFileError = textContent.startsWith(fileErrorPrefix);
                       
-                      console.log(`[MessageList] Checking text part: "${textContent.substring(0, 50)}...", isFileContent: ${isFileContent}, isFileError: ${isFileError}`);
+                      // console.log(`[MessageList] Checking text part: "${textContent.substring(0, 50)}...", isFileContent: ${isFileContent}, isFileError: ${isFileError}`);
 
                       if (isFileContent || isFileError) {
                         let filename = 'unknown file';

@@ -27,6 +27,20 @@ contextBridge.exposeInMainWorld('electron', {
         ipcRenderer.on('chat-stream-tool-calls', (_, data) => callback(data));
         return () => ipcRenderer.removeListener('chat-stream-tool-calls', callback);
       },
+      // Add listeners for tool execution steps
+      onToolCallStart: (callback) => {
+        ipcRenderer.on('tool-call-start', (_, data) => callback(data));
+        return () => ipcRenderer.removeListener('tool-call-start', callback);
+      },
+      onToolCallEnd: (callback) => {
+        ipcRenderer.on('tool-call-end', (_, data) => callback(data));
+        return () => ipcRenderer.removeListener('tool-call-end', callback);
+      },
+      // Add listener for final stream start (after tool calls)
+      onFinalStart: (callback) => {
+         ipcRenderer.on('chat-stream-final-start', (_, data) => callback(data));
+         return () => ipcRenderer.removeListener('chat-stream-final-start', callback);
+      },
       onComplete: (callback) => {
         ipcRenderer.on('chat-stream-complete', (_, data) => callback(data));
         return () => ipcRenderer.removeListener('chat-stream-complete', callback);
@@ -39,6 +53,11 @@ contextBridge.exposeInMainWorld('electron', {
         ipcRenderer.removeAllListeners('chat-stream-start');
         ipcRenderer.removeAllListeners('chat-stream-content');
         ipcRenderer.removeAllListeners('chat-stream-tool-calls');
+        // Add new listeners to cleanup
+        ipcRenderer.removeAllListeners('tool-call-start');
+        ipcRenderer.removeAllListeners('tool-call-end');
+        ipcRenderer.removeAllListeners('chat-stream-final-start');
+        // Existing cleanup
         ipcRenderer.removeAllListeners('chat-stream-complete');
         ipcRenderer.removeAllListeners('chat-stream-error');
       }

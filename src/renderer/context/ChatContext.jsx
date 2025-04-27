@@ -8,6 +8,7 @@ export const ChatProvider = ({ children }) => {
   const [messages, setMessages] = useState([]);
   const [activeChatId, setActiveChatId] = useState(null); // ID of the currently loaded chat
   const [savedChats, setSavedChats] = useState([]); // List of { id, title, lastModified } for the sidebar
+  const [thinkingSteps, setThinkingSteps] = useState({}); // State for tracking tool call progress { [messageId]: { [callId]: { ... } } }
 
   // Placeholder functions (will be expanded later or used directly)
   const loadChat = (chatId) => {
@@ -33,6 +34,8 @@ export const ChatProvider = ({ children }) => {
     setActiveChatId, // Expose setter directly for now
     savedChats,
     setSavedChats,   // Expose setter directly for now
+    thinkingSteps,
+    setThinkingSteps, // Expose setter for thinking steps
     // Add placeholder action functions (optional, could be handled in App.jsx)
     loadChat, 
     createNewChat, 
