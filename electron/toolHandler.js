@@ -74,10 +74,15 @@ async function handleExecuteToolCall(event, toolCall, discoveredTools, mcpClient
     // Execute the tool call via the MCP client
     console.log(`Executing MCP tool "${toolName}" on server ${clientId} with args:`, args);
     try {
-      const result = await client.callTool({
-        name: toolName,
-        arguments: args
-      });
+      // Attempt to pass timeout option (Note: May not work based on SDK issue)
+      const result = await client.callTool(
+        {
+          name: toolName,
+          arguments: args
+        },
+        undefined, // Placeholder for potentially deprecated/unused options
+        { timeout: 300000 } // 5 minutes (300,000 ms)
+      );
 
        console.log(`MCP tool "${toolName}" executed successfully. Result content length: ${JSON.stringify(result?.content)?.length}`);
 

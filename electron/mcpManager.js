@@ -53,7 +53,7 @@ function setupServerHealthCheck(client, serverId, intervalMs) {
     try {
       // Use a lightweight operation like listTools for health check
       // Add a timeout specific to the health check itself
-       const healthCheckTimeout = 15000; // 15s timeout for health check probe
+       const healthCheckTimeout = 600000; // 10 minute timeout for health check probe
        await Promise.race([
             client.listTools(), // Or potentially a dedicated health check endpoint if MCP SDK adds one
             new Promise((_, reject) =>

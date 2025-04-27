@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { v4 as uuidv4 } from 'uuid'; // Import uuid
 import { FileText, Image as ImageIcon, AlertCircle, Loader2, CheckCircle, XCircle } from 'lucide-react'; // Add icons
 
@@ -8,7 +8,8 @@ const STATUS_EXTRACTING = 'extracting';
 const STATUS_COMPLETE = 'complete';
 const STATUS_ERROR = 'error';
 
-function ChatInput({ onSendMessage, loading = false, visionSupported = false, selectedPlatform }) {
+// Wrap component with forwardRef
+const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported = false, selectedPlatform }, ref) => {
   const [message, setMessage] = useState('');
   // Updated attachments state structure
   const [attachments, setAttachments] = useState([]); 
@@ -25,6 +26,13 @@ function ChatInput({ onSendMessage, loading = false, visionSupported = false, se
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   const prevLoadingRef = useRef(loading);
+
+  // Expose focus method via useImperativeHandle
+  useImperativeHandle(ref, () => ({
+    focus: () => {
+      textareaRef.current?.focus();
+    }
+  }));
 
   // Allowed file types (adjust as needed)
   const allowedFileTypes = [
@@ -518,6 +526,6 @@ function ChatInput({ onSendMessage, loading = false, visionSupported = false, se
       </div>
     </form>
   );
-}
+}); // Close forwardRef
 
 export default ChatInput; 

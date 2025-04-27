@@ -80,6 +80,7 @@ function App() {
   const [isToolsPanelOpen, setIsToolsPanelOpen] = useState(false);
   const [mcpServersStatus, setMcpServersStatus] = useState({ loading: false, message: "" });
   const messagesEndRef = useRef(null);
+  const chatInputRef = useRef(null); // Add ref for ChatInput
   // Store the list of models from capabilities keys
   // const models = Object.keys(MODEL_CONTEXT_SIZES).filter(key => key !== 'default'); // Old way
   const [modelConfigs, setModelConfigs] = useState({}); // State for model configurations
@@ -127,6 +128,10 @@ function App() {
     setPausedChatState(null); // Clear any paused state
     setLoading(false); // Ensure loading indicator is off
     console.log("[handleNewChat] Finished clearing state.");
+    // Focus the chat input after the next frame to ensure DOM update
+    requestAnimationFrame(() => {
+       chatInputRef.current?.focus(); 
+    });
     // Do NOT automatically save here. Saving happens on the first message.
   };
   // --- End Task 10 ---
@@ -1323,6 +1328,7 @@ ${part.content}` };
               </div>
 
               <ChatInput
+                ref={chatInputRef}
                 onSendMessage={handleSendMessage}
                 loading={loading}
                 visionSupported={isVisionSupported}

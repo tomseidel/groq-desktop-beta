@@ -58,19 +58,27 @@ The application is built using web technologies (React, Vite, TailwindCSS) for t
 
 ## 4. Core Components & Features
 
--   **Chat Interface:** (`src/renderer/`, `electron/chatHandler.js`, `electron/messageUtils.js`)
-    -   Provides a UI for sending messages (including potential future image/file support) to LLMs.
-    -   Supports platform selection (Groq, OpenRouter) and dynamic model loading/selection per platform.
-    -   Supports rendering Markdown and code blocks.
-    -   Frontend components in `src/renderer/components/` and `src/renderer/pages/`, state managed likely in `src/renderer/context/`.
+-   **Chat Interface:** (`src/renderer/`, `electron/chatHandler.js`, `electron/messageUtils.js`, `electron/fileExtractor.js`)
+    -   Provides a UI for sending messages to LLMs, supporting text and file attachments.
+    -   **File Attachments:**
+        -   UI (`src/renderer/components/ChatInput.jsx`) allows attaching files via button click, drag-and-drop, or pasting.
+        -   Shows previews: thumbnails for images, status icons (pending, extracting, complete, error) for other files.
+        -   Enforces a 1-image limit when using Groq vision models.
+        -   Background text extraction for supported file types (`.txt`, `.md`, `.pdf`, `.docx`) handled via IPC (`electron/main.js`, `electron/fileExtractor.js`) using libraries like `pdf-parse` and `mammoth`.
+        -   Displays attached file placeholders (icons, filenames) in the chat history (`src/renderer/components/MessageList.jsx`).
+    -   Supports platform selection (Groq, OpenRouter) and dynamic model loading/selection per platform, including pricing display for OpenRouter models.
+    -   Supports rendering Markdown and code blocks in responses.
     -   Backend chat logic (`electron/chatHandler.js`) uses standard HTTPS requests with OpenAI-compatible API format.
-    -   Dynamic chat history pruning (`electron/messageUtils.js`) based on the selected model's context window size.
+        -   Includes extracted file content in the prompt sent to the LLM.
+        -   Strips image data from older messages to preserve context window.
+        -   Handles Groq vision model limitations (1 image, no system prompt with images).
+    -   Accurate context window management (`electron/chatHandler.js`, using `tiktoken`): Automatically truncates older messages to fit within the selected model's context limit.
 -   **Platform/Model Management:** (`electron/main.js`, `src/renderer/App.jsx`)
-    -   Fetches available models dynamically from configured platforms (Groq, OpenRouter) via their APIs.
+    -   Fetches available models dynamically from configured platforms (Groq, OpenRouter) via their APIs, including vision support flags and OpenRouter pricing.
     -   Allows users to switch platforms and select models through the UI.
     -   Saves and loads the selected platform/model with each chat session.
 -   **Chat Persistence:** (`electron/main.js`, `src/renderer/App.jsx`, `src/renderer/context/ChatContext.jsx`)
-    -   Saves chat history (messages, title, platform, model) to local JSON files.
+    -   Saves chat history (messages, title, platform, model) to local JSON files, transforming file content messages for consistent display.
     -   Loads previous chats from the sidebar.
     -   Handles creation of new chats and deletion/renaming of existing chats.
 -   **MCP Server Support:** (`electron/mcpManager.js`, `electron/toolHandler.js`)
@@ -114,3 +122,11 @@ pnpm dist
 ```
 
 Installable packages will be created in the `release/` directory.
+
+To run the app in dev mode, you can use the following command:
+
+```bash
+pnpm dev
+```
+
+
