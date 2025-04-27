@@ -388,7 +388,6 @@ ${part.content}` }; // Ensure content is included
                                     finish_reason: accumulatedToolCalls.length > 0 ? 'tool_calls' : 'stop', // Infer finish reason
                                     //usage: finalUsage // <<< REMOVE usage
                                 });
-                                req.abort(); // Ensure connection closes
                             }
                             return; // Stop processing further data chunks
                         }
@@ -482,7 +481,6 @@ ${part.content}` }; // Ensure content is included
                                             finish_reason: finalFinishReason,
                                             //usage: finalUsage // <<< REMOVE usage
                                         });
-                                        req.abort(); // Ensure connection closes
                                     }
                                     return; // Stop processing
                                 }
