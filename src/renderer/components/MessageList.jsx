@@ -51,7 +51,7 @@ const getIconForFileType = (filename) => {
 };
 // --- End Helper Function ---
 
-function MessageList({ messages = [], onToolCallExecute, onRemoveLastMessage }) {
+function MessageList({ messages = [], onToolCallExecute, onRemoveLastMessage, onSaveEdit }) {
   const [showRemoveButtonIndex, setShowRemoveButtonIndex] = useState(null);
   const [fullScreenImage, setFullScreenImage] = useState(null);
 
@@ -89,135 +89,149 @@ function MessageList({ messages = [], onToolCallExecute, onRemoveLastMessage }) 
 
   return (
     <div className="space-y-2 pt-4">
-      {displayMessages.map((message, index) => (
-        <Message 
-          key={message.id || index}
-          message={message} 
-          onToolCallExecute={onToolCallExecute}
-          allMessages={messages} // Pass all messages for the Message component to find tool results
-          isLastMessage={index === displayMessages.length - 1}
-          onRemoveMessage={index === displayMessages.length - 1 ? onRemoveLastMessage : null}
-        >
-          {message.role === 'user' ? (
-            <div 
-              className="flex items-start gap-2"
-              onMouseEnter={() => index === displayMessages.length - 1 && onRemoveLastMessage && setShowRemoveButtonIndex(index)}
-              onMouseLeave={() => setShowRemoveButtonIndex(null)}
-            >
-              <div className="flex-1 flex flex-col gap-2"> {/* Use flex-col for text/images */}
-                {/* Check if content is an array (structured) or string (simple text) */}
-                {Array.isArray(message.content) ? (
-                  message.content.map((part, partIndex) => {
-                    // --- Handle different content part types ---
-                    if (part.type === 'file_content') {
-                      const IconComponent = getIconForFileType(part.name);
-                      return (
-                        <div 
-                          key={`file-content-${partIndex}`}
-                          className="flex items-center gap-2 p-2 bg-gray-700 rounded-md border border-gray-600 text-sm text-gray-300 self-start"
-                          title={`Content from ${part.name} was included in the prompt`}
-                        >
-                          <IconComponent size={18} className="flex-shrink-0" />
-                          <span>{part.name} (Content used in prompt)</span>
-                        </div>
-                      );
-                    } else if (part.type === 'file_error') {
-                      const IconComponent = getIconForFileType(part.name);
-                      return (
-                        <div 
-                          key={`file-error-${partIndex}`}
-                          className="flex items-center gap-2 p-2 bg-red-900 bg-opacity-50 rounded-md border border-red-700 text-sm text-red-400 self-start"
-                          title={`Error processing ${part.name}: ${part.error || 'Unknown error'}`}
-                        >
-                          <XCircle size={18} className="flex-shrink-0" />
-                          <span>{part.name}: {part.error || 'Extraction failed'}</span>
-                        </div>
-                      );
-                    } else if (part.type === 'text') {
-                      // Check for attached file content/error marker (saved state)
-                      const textContent = part.text || '';
-                      const isFileContent = textContent.startsWith(fileContentPrefix);
-                      const isFileError = textContent.startsWith(fileErrorPrefix);
-                      
-                      // console.log(`[MessageList] Checking text part: "${textContent.substring(0, 50)}...", isFileContent: ${isFileContent}, isFileError: ${isFileError}`);
+      {displayMessages.map((message, displayIndex) => {
+        // Find the original index in the unfiltered 'messages' array
+        const originalIndex = messages.findIndex(origMsg => origMsg.id === message.id);
+        
+        // Handle case where message ID might not be found (shouldn't happen ideally)
+        if (originalIndex === -1) {
+          console.warn(`Could not find original index for message:`, message);
+          // Optionally skip rendering or use displayIndex as a fallback?
+          // Using displayIndex is risky, maybe better to not render edit button?
+        }
+        
+        return (
+          <Message 
+            key={message.id || displayIndex} // Keep key based on display list
+            message={message} 
+            onToolCallExecute={onToolCallExecute}
+            allMessages={messages} // Pass all messages for the Message component to find tool results
+            isLastMessage={displayIndex === displayMessages.length - 1}
+            onRemoveMessage={displayIndex === displayMessages.length - 1 ? onRemoveLastMessage : null}
+            originalIndex={originalIndex} // Pass the ORIGINAL index
+            onSaveEdit={originalIndex !== -1 ? onSaveEdit : null} // Only pass handler if index found
+          >
+            {message.role === 'user' ? (
+              <div 
+                className="flex items-start gap-2"
+                onMouseEnter={() => displayIndex === displayMessages.length - 1 && onRemoveLastMessage && setShowRemoveButtonIndex(displayIndex)}
+                onMouseLeave={() => setShowRemoveButtonIndex(null)}
+              >
+                <div className="flex-1 flex flex-col gap-2"> {/* Use flex-col for text/images */}
+                  {/* Check if content is an array (structured) or string (simple text) */}
+                  {Array.isArray(message.content) ? (
+                    message.content.map((part, partIndex) => {
+                      // --- Handle different content part types ---
+                      if (part.type === 'file_content') {
+                        const IconComponent = getIconForFileType(part.name);
+                        return (
+                          <div 
+                            key={`file-content-${partIndex}`}
+                            className="flex items-center gap-2 p-2 bg-gray-700 rounded-md border border-gray-600 text-sm text-gray-300 self-start"
+                            title={`Content from ${part.name} was included in the prompt`}
+                          >
+                            <IconComponent size={18} className="flex-shrink-0" />
+                            <span>{part.name} (Content used in prompt)</span>
+                          </div>
+                        );
+                      } else if (part.type === 'file_error') {
+                        const IconComponent = getIconForFileType(part.name);
+                        return (
+                          <div 
+                            key={`file-error-${partIndex}`}
+                            className="flex items-center gap-2 p-2 bg-red-900 bg-opacity-50 rounded-md border border-red-700 text-sm text-red-400 self-start"
+                            title={`Error processing ${part.name}: ${part.error || 'Unknown error'}`}
+                          >
+                            <XCircle size={18} className="flex-shrink-0" />
+                            <span>{part.name}: {part.error || 'Extraction failed'}</span>
+                          </div>
+                        );
+                      } else if (part.type === 'text') {
+                        // Check for attached file content/error marker (saved state)
+                        const textContent = part.text || '';
+                        const isFileContent = textContent.startsWith(fileContentPrefix);
+                        const isFileError = textContent.startsWith(fileErrorPrefix);
+                        
+                        // console.log(`[MessageList] Checking text part: "${textContent.substring(0, 50)}...", isFileContent: ${isFileContent}, isFileError: ${isFileError}`);
 
-                      if (isFileContent || isFileError) {
-                        let filename = 'unknown file';
-                        let errorDetail = '';
-                        const closingBracketIndex = textContent.indexOf(']');
-                        if (closingBracketIndex !== -1) {
-                            const prefixToRemove = isFileError ? fileErrorPrefix : fileContentPrefix;
-                            // Extract text between prefix and closing bracket
-                            let nameAndError = textContent.substring(prefixToRemove.length, closingBracketIndex);
-                            // Check if there's an error detail part (e.g., "filename: error message")
-                            const errorSeparatorIndex = nameAndError.indexOf(': ');
-                            if (isFileError && errorSeparatorIndex !== -1) {
-                                filename = nameAndError.substring(0, errorSeparatorIndex);
-                                errorDetail = nameAndError.substring(errorSeparatorIndex + 2);
-                            } else {
-                                filename = nameAndError; // Assume the whole part is the filename if no error separator
-                            }
-                        }
+                        if (isFileContent || isFileError) {
+                          let filename = 'unknown file';
+                          let errorDetail = '';
+                          const closingBracketIndex = textContent.indexOf(']');
+                          if (closingBracketIndex !== -1) {
+                              const prefixToRemove = isFileError ? fileErrorPrefix : fileContentPrefix;
+                              // Extract text between prefix and closing bracket
+                              let nameAndError = textContent.substring(prefixToRemove.length, closingBracketIndex);
+                              // Check if there's an error detail part (e.g., "filename: error message")
+                              const errorSeparatorIndex = nameAndError.indexOf(': ');
+                              if (isFileError && errorSeparatorIndex !== -1) {
+                                  filename = nameAndError.substring(0, errorSeparatorIndex);
+                                  errorDetail = nameAndError.substring(errorSeparatorIndex + 2);
+                              } else {
+                                  filename = nameAndError; // Assume the whole part is the filename if no error separator
+                              }
+                          }
 
-                        const IconComponent = getIconForFileType(filename);
+                          const IconComponent = getIconForFileType(filename);
 
-                        if (isFileError) {
-                            // Render error placeholder
-                            return (
+                          if (isFileError) {
+                              // Render error placeholder
+                              return (
+                                  <div 
+                                    key={`file-text-error-${partIndex}`}
+                                    className="flex items-center gap-2 p-2 bg-red-900 bg-opacity-50 rounded-md border border-red-700 text-sm text-red-400 self-start"
+                                    title={`Error processing ${filename}: ${errorDetail || 'Unknown error'}`}
+                                  >
+                                    <XCircle size={18} className="flex-shrink-0" />
+                                    <span>{filename}: Error processing file</span>
+                                  </div>
+                                );
+                          } else {
+                              // Render success placeholder (content used)
+                              return (
                                 <div 
-                                  key={`file-text-error-${partIndex}`}
-                                  className="flex items-center gap-2 p-2 bg-red-900 bg-opacity-50 rounded-md border border-red-700 text-sm text-red-400 self-start"
-                                  title={`Error processing ${filename}: ${errorDetail || 'Unknown error'}`}
+                                  key={`file-text-${partIndex}`}
+                                  className="flex items-center gap-2 p-2 bg-gray-700 rounded-md border border-gray-600 text-sm text-gray-300 self-start"
+                                  title={`Content from ${filename} was included in the prompt`}
                                 >
-                                  <XCircle size={18} className="flex-shrink-0" />
-                                  <span>{filename}: Error processing file</span>
+                                  <IconComponent size={18} className="flex-shrink-0" />
+                                  <span>{filename} (Content used in prompt)</span>
                                 </div>
                               );
+                          }
                         } else {
-                            // Render success placeholder (content used)
-                            return (
-                              <div 
-                                key={`file-text-${partIndex}`}
-                                className="flex items-center gap-2 p-2 bg-gray-700 rounded-md border border-gray-600 text-sm text-gray-300 self-start"
-                                title={`Content from ${filename} was included in the prompt`}
-                              >
-                                <IconComponent size={18} className="flex-shrink-0" />
-                                <span>{filename} (Content used in prompt)</span>
-                              </div>
-                            );
+                          // Render normal text using MarkdownRenderer
+                          // Remove previous logging here if desired, or keep for debugging other text
+                          // console.log(`[MessageList] Checking text part:`, part.text?.substring(0, 100)); 
+                          // console.log(`[MessageList] Regex match result: null`); 
+                          return <MarkdownRenderer key={`text-${partIndex}`} content={textContent} />;
                         }
-                      } else {
-                        // Render normal text using MarkdownRenderer
-                        // Remove previous logging here if desired, or keep for debugging other text
-                        // console.log(`[MessageList] Checking text part:`, part.text?.substring(0, 100)); 
-                        // console.log(`[MessageList] Regex match result: null`); 
-                        return <MarkdownRenderer key={`text-${partIndex}`} content={textContent} />;
+                      } else if (part.type === 'image_url' && part.image_url?.url) {
+                        // Render image preview
+                        return (
+                          <img
+                            key={`image-${partIndex}`}
+                            src={part.image_url.url} // Assumes base64 data URL
+                            alt={`Uploaded image ${partIndex + 1}`}
+                            className="max-w-xs max-h-48 rounded-md cursor-pointer self-start" // Align images left
+                            onClick={() => setFullScreenImage(part.image_url.url)} // Show fullscreen on click
+                          />
+                        );
                       }
-                    } else if (part.type === 'image_url' && part.image_url?.url) {
-                      // Render image preview
-                      return (
-                        <img
-                          key={`image-${partIndex}`}
-                          src={part.image_url.url} // Assumes base64 data URL
-                          alt={`Uploaded image ${partIndex + 1}`}
-                          className="max-w-xs max-h-48 rounded-md cursor-pointer self-start" // Align images left
-                          onClick={() => setFullScreenImage(part.image_url.url)} // Show fullscreen on click
-                        />
-                      );
-                    }
-                    return null; // Should not happen with current structure
-                  })
-                ) : (
-                  // If content is just a string, render it directly (shouldn't contain file content anymore, but handle just in case)
-                  <MarkdownRenderer content={message.content || ''} />
-                )}
+                      return null; // Should not happen with current structure
+                    })
+                  ) : (
+                    // If content is just a string, render it directly (shouldn't contain file content anymore, but handle just in case)
+                    <MarkdownRenderer content={message.content || ''} />
+                  )}
+                </div>
               </div>
-            </div>
-          ) : message.role === 'assistant' ? (
-            <MarkdownRenderer content={message.content || ''} />
-          ) : null}
-        </Message>
-      ))}
+            ) : message.role === 'assistant' ? (
+              <MarkdownRenderer content={message.content || ''} />
+            ) : null}
+          </Message>
+        );
+      })}
 
       {/* Fullscreen Image Overlay */}
       {fullScreenImage && (

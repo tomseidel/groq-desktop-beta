@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { v4 as uuidv4 } from 'uuid'; // Import uuid
-import { FileText, Image as ImageIcon, AlertCircle, Loader2, CheckCircle, XCircle } from 'lucide-react'; // Add icons
+import { FileText, Image as ImageIcon, AlertCircle, Loader2, CheckCircle, XCircle } from 'lucide-react'; // Remove X icon import if not needed elsewhere
 
 // Define Attachment Status constants
 const STATUS_PENDING = 'pending';
@@ -328,13 +328,13 @@ const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported 
     prevLoadingRef.current = loading;
   }, [loading]);
 
+  // Modified handleSubmit to handle both sending new messages and submitting edits
   const handleSubmit = (e) => {
     e.preventDefault();
     const textContent = message.trim();
     const hasText = textContent.length > 0;
     const hasAttachments = attachments.length > 0;
 
-    // Ensure extraction isn't pending before allowing send
     const isExtractionPending = attachments.some(att => att.status === STATUS_PENDING || att.status === STATUS_EXTRACTING);
     if ((hasText || hasAttachments) && !loading && !isExtractionPending) {
       let contentToSend = [];
@@ -344,41 +344,35 @@ const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported 
         if (att.isImage && att.base64 && att.status === STATUS_COMPLETE) {
           contentToSend.push({
             type: 'image_url',
-            image_url: { url: att.base64 } 
+            image_url: { url: att.base64 }
           });
         } else if (!att.isImage && att.status === STATUS_COMPLETE && att.extractedText) {
-            // Send extracted content for completed files
             contentToSend.push({
-                type: 'file_content', // New type for backend
+                type: 'file_content',
                 name: att.name,
-                content: att.extractedText 
+                content: att.extractedText
             });
         } else if (att.status === STATUS_ERROR) {
-             // Send error info for failed files
              contentToSend.push({
-                 type: 'file_error', // New type for backend
+                 type: 'file_error',
                  name: att.name,
                  error: att.errorMessage || 'Unknown extraction error'
              });
         } else if (!att.isImage && att.status !== STATUS_COMPLETE && att.status !== STATUS_ERROR){
-             // Fallback for files that somehow didn't complete or error (e.g., non-text/pdf/docx initially)
-             // Send basic metadata like before
              contentToSend.push({
                 type: 'text',
-                text: `[User attached file: ${att.name} (${att.type}, ${Math.round(att.size / 1024)} KB) - Content not processed]` 
+                text: `[User attached file: ${att.name} (${att.type}, ${Math.round(att.size / 1024)} KB) - Content not processed]`
              });
         }
-        // Note: We skip attachments with status PENDING or EXTRACTING because disableSend should prevent this submit
       });
 
       // Add user's text message last, if present
       if (hasText) {
         contentToSend.push({ type: 'text', text: textContent });
       }
-      
-      // Ensure we always send *something* if there are attachments, even if text is empty
+
       if (contentToSend.length > 0) {
-        onSendMessage(contentToSend);
+        onSendMessage(contentToSend); // Call original send handler
         setMessage('');
         setAttachments([]); // Clear attachments after sending
       }
@@ -396,6 +390,7 @@ const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported 
   const disableImageAdding = selectedPlatform === 'groq' && visionSupported && attachments.some(att => att.isImage);
   // Calculate if send should be disabled (due to loading or pending extraction)
   const isExtractionPending = attachments.some(att => att.status === STATUS_PENDING || att.status === STATUS_EXTRACTING);
+  // Disable if loading, extraction pending, or if NOT editing AND input/attachments are empty
   const disableSend = loading || isExtractionPending || (!message.trim() && attachments.length === 0);
 
   return (
@@ -472,7 +467,7 @@ const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported 
 
       {/* Input Row */}
       <div className="flex items-end gap-2"> {/* Changed items-start to items-end */}
-        {/* File Upload Button - Show if fewer than 5 attachments */}
+        {/* File Upload Button - Show if fewer than 5 attachments AND not editing */}
         {attachments.length < 5 && (
           <button
             type="button"
@@ -498,28 +493,30 @@ const ChatInput = forwardRef(({ onSendMessage, loading = false, visionSupported 
         />
 
         {/* Text Area & Send Button Container */}
-        <div className="flex-1 flex items-end gap-2"> {/* Container for text area and send button */} 
+        <div className="flex-1 flex items-end gap-2 bg-gray-700 rounded-md border border-gray-600 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary"> {/* Added container */}
           <textarea
             ref={textareaRef}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             onKeyDown={handleKeyDown}
-            onPaste={handlePaste} // Add paste handler
-            placeholder="Type a message... (Shift+Enter for newline)"
-            className="w-full block py-2 px-3 border border-gray-500 rounded-md focus:outline-none focus:ring-2 focus:ring-primary bg-transparent text-white placeholder-gray-400 resize-none overflow-hidden max-h-[200px]" // Adjusted padding/height potentially
-            rows={1}
+            onPaste={handlePaste} // Keep paste handler
+            placeholder="Type your message or drop files..."
+            className="flex-1 p-2 bg-transparent text-white placeholder-gray-400 resize-none border-none focus:outline-none focus:ring-0 overflow-y-auto max-h-40" // Adjust max-h as needed
+            rows="1"
             disabled={loading}
           />
-          {/* Send Button */}
+          {/* Send/Submit Button */}
           <button
             type="submit"
-            className="py-2 px-4 bg-primary hover:bg-primary/90 text-white rounded transition-colors self-end flex-shrink-0" // Added flex-shrink-0
-            disabled={disableSend} // Disable if no text and no attachments
+            className={`p-2 rounded-md ${disableSend ? 'bg-gray-600 text-gray-400 cursor-not-allowed' : 'bg-primary text-white hover:bg-primary-dark'}`}
+            disabled={disableSend}
+            title={'Send message'} // Revert title
           >
-            {loading ? (
-              <span>Sending...</span>
-            ) : (
-              <span>Send</span>
+            {/* Use original icon logic */}
+            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : (
+                 <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                 </svg>
             )}
           </button>
         </div>

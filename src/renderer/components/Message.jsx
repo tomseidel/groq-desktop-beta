@@ -3,9 +3,11 @@ import ToolCall from './ToolCall';
 import { useChat } from '../context/ChatContext';
 import MarkdownRenderer from './MarkdownRenderer';
 
-function Message({ message, children, onToolCallExecute, allMessages, isLastMessage, onRemoveMessage }) {
+function Message({ message, children, onToolCallExecute, allMessages, isLastMessage, onRemoveMessage, originalIndex, onEditMessage, onSaveEdit }) {
   const { role, tool_calls, reasoning, isStreaming, status, id: messageId, content, finalContent } = message;
   const [showReasoning, setShowReasoning] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedContent, setEditedContent] = useState('');
   const { thinkingSteps } = useChat();
   const isUser = role === 'user';
   const hasReasoning = reasoning && !isUser;
@@ -34,6 +36,39 @@ function Message({ message, children, onToolCallExecute, allMessages, isLastMess
 
   const toggleReasoning = () => setShowReasoning(!showReasoning);
 
+  // Function to extract plain text content for editing
+  const getPlainTextContent = (msgContent) => {
+      if (Array.isArray(msgContent)) {
+          const textPart = msgContent.find(part => part.type === 'text');
+          return textPart ? textPart.text : '';
+      } else if (typeof msgContent === 'string') {
+          return msgContent;
+      }
+      return ''; // Default empty string if no text found
+  };
+
+  const handleEditClick = () => {
+      setEditedContent(getPlainTextContent(content)); // Initialize with current text
+      setIsEditing(true);
+  };
+
+  const handleCancelClick = () => {
+      setIsEditing(false);
+      setEditedContent(''); // Clear edited content
+  };
+
+  const handleSaveClick = () => {
+      // Basic validation: Don't save if empty
+      if (editedContent.trim() === '') {
+          // Optionally show an error or just cancel
+          handleCancelClick();
+          return;
+      }
+      // Call the save handler passed from parent (App.jsx) using originalIndex
+      onSaveEdit(originalIndex, editedContent);
+      setIsEditing(false); // Exit editing mode after calling save
+  };
+
   return (
     <div className={messageClasses}>
       {/* --- Tool Message Rendering --- */} 
@@ -56,22 +91,64 @@ function Message({ message, children, onToolCallExecute, allMessages, isLastMess
                      </svg>
                 </button>
              )}
-            {/* Render Initial Content (Passed as children from MessageList) */}
-             <div className={wrapperClasses}>
-               {children} {/* Render content passed from MessageList */} 
-               {/* Show streaming dots for initial text, *not* when processing tools */}
-                {role === 'assistant' && isStreamingMessage && status === 'streaming_text' && (
-                 <div className="streaming-indicator ml-1 inline-block">
-                   <span className="dot-1"></span>
-                   <span className="dot-2"></span>
-                   <span className="dot-3"></span>
-                 </div>
-               )}
-            </div>
+             {/* Edit button for user messages - updated onClick */} 
+             {isUser && onSaveEdit && (
+                  <button
+                      onClick={handleEditClick} // Use local handler
+                      className={`absolute right-10 top-0 -translate-y-1/2 bg-blue-500 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-200 hover:bg-blue-600 z-10 ${isEditing ? 'hidden' : ''}`} // Hide button when editing
+                      title="Edit message"
+                  >
+                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                  </button>
+             )}
+            {/* Render Initial Content OR Editing UI */}
+            {isEditing ? (
+                // --- Editing UI --- 
+                <div className="flex flex-col gap-2 w-full">
+                     <textarea
+                         value={editedContent}
+                         onChange={(e) => setEditedContent(e.target.value)}
+                         className="w-full p-2 rounded-md bg-gray-600 text-white placeholder-gray-400 resize-y border border-gray-500 focus:outline-none focus:ring-1 focus:ring-primary min-h-[60px]"
+                         rows={3} // Adjust rows as needed
+                         // Auto-focus might be desirable, but handle carefully
+                         // autoFocus 
+                     />
+                     <div className="flex justify-end gap-2">
+                         <button
+                             onClick={handleCancelClick}
+                             className="px-3 py-1 rounded-md bg-gray-500 hover:bg-gray-400 text-white text-sm"
+                         >
+                             Cancel
+                         </button>
+                         <button
+                             onClick={handleSaveClick}
+                             className="px-3 py-1 rounded-md bg-primary hover:bg-primary-dark text-white text-sm"
+                         >
+                             Save & Submit
+                         </button>
+                     </div>
+                </div>
+                // --- End Editing UI ---
+            ) : (
+                // --- Original Content Rendering --- 
+                <div className={wrapperClasses}>
+                  {children} {/* Render content passed from MessageList */} 
+                  {/* Show streaming dots for initial text, *not* when processing tools */}
+                   {role === 'assistant' && isStreamingMessage && status === 'streaming_text' && (
+                    <div className="streaming-indicator ml-1 inline-block">
+                      <span className="dot-1"></span>
+                      <span className="dot-2"></span>
+                      <span className="dot-3"></span>
+                    </div>
+                  )}
+                </div>
+            )}
             
             {/* --- Thinking Steps Visualization --- */} 
             {/* Show EITHER live thinking steps OR historical tool calls */} 
-            {role === 'assistant' && thinkingStepIds.length > 0 && (
+            {!isEditing && role === 'assistant' && thinkingStepIds.length > 0 && (
                  // Existing Live Thinking Steps Rendering based on thinkingSteps state
                  <div className="thinking-steps-container mt-2 border-t border-gray-600 pt-2 space-y-2">
                      {thinkingStepIds.map((callId) => {
@@ -134,7 +211,7 @@ function Message({ message, children, onToolCallExecute, allMessages, isLastMess
                  </div>
             )}
             {/* --- Historical Tool Call Display --- */} 
-            {role === 'assistant' && thinkingStepIds.length === 0 && tool_calls && tool_calls.length > 0 && (
+            {!isEditing && role === 'assistant' && thinkingStepIds.length === 0 && tool_calls && tool_calls.length > 0 && (
                  <div className="historical-tool-steps-container mt-2 border-t border-gray-600 pt-2 space-y-2">
                      {tool_calls.map((toolCall, index) => {
                          const toolResultContent = findToolResult(toolCall.id); // Find the saved result
@@ -207,8 +284,8 @@ function Message({ message, children, onToolCallExecute, allMessages, isLastMess
             )}
             {/* --- End Thinking/Historical Steps --- */}
 
-            {/* Render Final Content (Only for Assistant messages) */} 
-             {role === 'assistant' && (finalContent || status === 'streaming_final_response') && (
+            {/* Render Final Content (Only for Assistant messages and NOT editing) */} 
+             {!isEditing && role === 'assistant' && (finalContent || status === 'streaming_final_response') && (
                 <div className={`${wrapperClasses} mt-2 pt-2 border-t border-gray-600`}>
                      <MarkdownRenderer content={finalContent || ''} />
                      {role === 'assistant' && isStreamingMessage && status === 'streaming_final_response' && ( 
@@ -221,8 +298,8 @@ function Message({ message, children, onToolCallExecute, allMessages, isLastMess
                 </div>
              )}
 
-            {/* Reasoning Section (Keep as is) */} 
-             {hasReasoning && (
+            {/* Reasoning Section (Only show if NOT editing) */} 
+             {!isEditing && hasReasoning && (
               <div className="mt-3 border-t border-gray-600 pt-2">
                 <button 
                   onClick={toggleReasoning}

@@ -6,6 +6,7 @@ import ToolsPanel from './components/ToolsPanel';
 import ToolApprovalModal from './components/ToolApprovalModal';
 import ChatListSidebar from './components/ChatListSidebar';
 import { useChat } from './context/ChatContext'; // Import useChat hook
+import { v4 as uuidv4 } from 'uuid'; // Re-add uuid import
 // import { get_encoding } from "@dqbd/tiktoken"; // Removed
 
 // LocalStorage keys
@@ -72,7 +73,7 @@ function App() {
     savedChats, 
     setSavedChats,
     thinkingSteps, // Get thinkingSteps state
-    setThinkingSteps // Get thinkingSteps setter
+    setThinkingSteps, // Get thinkingSteps setter
   } = useChat(); 
   const [loading, setLoading] = useState(false);
   const [selectedPlatform, setSelectedPlatform] = useState('groq'); // 'groq' or 'openrouter'
@@ -315,36 +316,6 @@ ${part.content}` };
     }
   };
   // --- End Task 13 ---
-
-  // --- Phase 4: Rename Chat Logic ---
-  const handleRenameChat = async (chatId, newTitle) => {
-      console.log(`[handleRenameChat] Attempting to rename chat ${chatId} to "${newTitle}"`);
-      if (!chatId || !newTitle || !newTitle.trim()) {
-          console.error("[handleRenameChat] Invalid arguments provided.");
-          return; // Or provide feedback
-      }
-      
-      try {
-          const renameResult = await window.electron.updateChatMetadata(chatId, { title: newTitle.trim() });
-          
-          if (renameResult && renameResult.success) {
-              console.log(`[handleRenameChat] Chat ${chatId} renamed successfully.`);
-              // Refresh list if the backend indicates a change occurred
-              if (renameResult.needsRefresh) {
-                 console.log("[handleRenameChat] Refreshing chat list after rename...");
-                 const updatedChatList = await window.electron.listChats();
-                 setSavedChats(updatedChatList || []);
-              }
-          } else {
-               console.error(`[handleRenameChat] Failed to rename chat ${chatId}:`, renameResult?.error || "Unknown backend error");
-              // Optionally notify user of failure
-          }
-      } catch (error) {
-           console.error(`[handleRenameChat] Error calling updateChatMetadata IPC handler for ${chatId}:`, error);
-           // Optionally notify user
-      }
-  };
-  // --- End Phase 4 Rename ---
 
   // --- Function to load models for a specific platform ---
   const loadModelsForPlatform = async (platform) => {
@@ -1489,6 +1460,57 @@ ${part.content}` };
     }
   }, [messages, activeChatId, lastSavedMessageId, initialLoadComplete, saveCurrentChat]);
 
+  // --- Inline Edit Save Logic ---
+  const handleSaveEdit = async (index, newContent) => {
+    console.log(`[handleSaveEdit] Saving edit for message at index: ${index}`);
+    setLoading(true); // Start loading indicator
+
+    // 1. Get current messages (use state directly)
+    const currentMessages = messages;
+
+    // 2. Slice history up to the edited message
+    const historyBeforeEdit = currentMessages.slice(0, index);
+
+    // 3. Create the new user message object
+    const editedUserMessage = {
+      id: uuidv4(), // Generate a new ID for the edited message
+      role: 'user',
+      // Ensure content matches the structure expected by the API (array with text part)
+      content: [{ type: 'text', text: newContent }]
+    };
+
+    // 4. Create the new history array
+    const newHistory = [...historyBeforeEdit, editedUserMessage];
+
+    // 5. Update the messages state *immediately*
+    // This replaces the old history and the message being edited
+    setMessages(newHistory);
+
+    // 6. Prepare for API call
+    const currentTools = mcpTools.map(tool => tool.definition);
+    const activeModelCapabilities = allPlatformModels[selectedPlatform]?.[selectedModel] || {};
+    const toolsForApi = activeModelCapabilities.supportsTools ? currentTools : undefined;
+
+    // 7. Save the chat *before* the API call
+    // Use the newHistory which only contains messages up to the edited user message
+    // Need to get the current activeChatId for saving
+    const currentActiveChatId = activeChatId; // Read current activeChatId
+    await saveCurrentChat(newHistory, currentActiveChatId); // Save with current activeChatId
+
+    // 8. Execute the chat turn with the new history
+    console.log("[handleSaveEdit] Executing chat turn with new history:", newHistory);
+    await executeChatTurn(newHistory);
+
+    // setLoading(false) is handled within executeChatTurn stream handlers
+    console.log("[handleSaveEdit] Edit save process complete.");
+  };
+  // --- End Inline Edit Save Logic ---
+
+  // --- Phase 4: Rename Chat Logic ---
+  const handleRenameChat = async (chatId, newTitle) => {
+    // ... existing code ...
+  };
+
   return (
     <div className="flex flex-row h-screen bg-gray-900">
       {/* --- Chat List Sidebar --- */}
@@ -1542,7 +1564,8 @@ ${part.content}` };
             <MessageList 
               messages={messages} 
               onToolCallExecute={executeToolCall} 
-              onRemoveLastMessage={handleRemoveLastMessage} 
+              onRemoveLastMessage={handleRemoveLastMessage}
+              onSaveEdit={handleSaveEdit} // Pass down the save handler
             />
             <div ref={messagesEndRef} />
           </div>
