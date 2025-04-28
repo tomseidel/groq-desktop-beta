@@ -1,110 +1,7 @@
 const https = require('https'); // Use standard HTTPS module
-const { get_encoding } = require("@dqbd/tiktoken");
 const { extractTextFromFile } = require('./fileExtractor'); // Import the extractor
 const { handleExecuteToolCall } = require('./toolHandler'); // Import tool executor
-
-// --- Token Counting & Context Fitting Logic (Moved from messageUtils.js) ---
-// Using cl100k_base as a general default suitable for gpt-4, gpt-3.5-turbo, text-embedding-ada-002, etc.
-const defaultEncoding = get_encoding("cl100k_base");
-
-/**
- * Estimates the number of tokens for a given text using tiktoken.
- */
-function countTokens(text) {
-  if (!text) return 0;
-  try {
-    return defaultEncoding.encode(text).length;
-  } catch (error) {
-    console.warn("Tiktoken encoding failed, falling back to rough estimate:", error);
-    return Math.ceil(text.length / 4);
-  }
-}
-
-/**
- * Estimates the total tokens for an array of message objects, updated for tool calls.
- */
-function countTokensForMessages(messages, modelId = 'gpt-4') {
-    let num_tokens = 0;
-    messages.forEach(message => {
-        // Base cost per message
-        num_tokens += 4; 
-
-        Object.entries(message).forEach(([key, value]) => {
-            // Count tokens for common string values like role, name, tool_call_id
-            if (typeof value === 'string') {
-                num_tokens += countTokens(value);
-            }
-
-            // Specific handling for content
-            if (key === 'content') {
-                if (typeof value === 'string') {
-                    // Already counted above if string
-                } else if (Array.isArray(value)) { // User message content parts
-                    value.forEach(part => {
-                        if (part.type === 'text') {
-                             num_tokens += countTokens(part.text || '');
-                        } else if (part.type === 'image_url') {
-                            num_tokens += 85; // Placeholder cost for images
-                        } 
-                        // Ignore file_content/file_error here as they were converted to text parts earlier
-                    });
-                } // Null content (assistant message with only tool calls) contributes 0 tokens
-            } 
-            // Specific handling for assistant tool calls
-            else if (key === 'tool_calls' && message.role === 'assistant' && Array.isArray(value)) {
-                 value.forEach(toolCall => {
-                    if (toolCall.function) {
-                        // Count function name and arguments (already counted if string via loop above, need name explicitly)
-                        num_tokens += countTokens(toolCall.function.name || ''); 
-                        num_tokens += countTokens(toolCall.function.arguments || '');
-                    }
-                 });
-            }
-        });
-
-        // Adjust for name/tool_call_id overhead (-1 token adjustment)
-        if (message.name || message.tool_call_id) {
-            num_tokens -= 1; // If name or tool_call_id is present, it replaces role, save 1 token
-        }
-    });
-    num_tokens += 2; // Every reply is primed with <|im_start|>assistant
-    return num_tokens;
-}
-
-/**
- * Ensures the message history fits within the model's context window by truncating older messages.
- */
-function ensureContextFits(messages, contextLimit, modelId = 'gpt-4', safetyBuffer = 200) {
-    const maxTokens = contextLimit - safetyBuffer;
-    let currentMessages = [...messages];
-    let systemPrompt = null;
-    if (currentMessages.length > 0 && currentMessages[0].role === 'system') {
-        systemPrompt = currentMessages.shift(); 
-    }
-
-    while (currentMessages.length > 0) {
-        const messagesToCheck = systemPrompt ? [systemPrompt, ...currentMessages] : currentMessages;
-        const currentTokens = countTokensForMessages(messagesToCheck, modelId);
-        
-        if (currentTokens <= maxTokens) {
-            break; 
-        }
-
-        console.warn(`Context window exceeded (${currentTokens} > ${maxTokens}). Truncating oldest message.`);
-        currentMessages.shift(); 
-    }
-    
-    if (systemPrompt) {
-        currentMessages.unshift(systemPrompt);
-    }
-
-    if (messages.length > currentMessages.length) {
-         console.log(`Truncated ${messages.length - currentMessages.length} messages to fit context limit.`);
-    }
-
-    return currentMessages;
-}
-// --- End Token Counting & Context Fitting Logic ---
+const { buildOptimizedHistory } = require('./contextHandler'); // Import the new context handler function
 
 /**
  * Handles the 'chat-stream' IPC event for streaming chat completions using OpenAI-compatible APIs.
@@ -117,10 +14,14 @@ function ensureContextFits(messages, contextLimit, modelId = 'gpt-4', safetyBuff
  * @param {Array<object>} discoveredTools - List of available MCP tools.
  * @param {string} selectedPlatform - The selected platform ('groq' or 'openrouter'). Passed explicitly.
  * @param {object} mcpClients - Object mapping server IDs to active MCP client instances.
+ * @param {string} chatId - The unique ID of the current chat session.
+ * @param {Function} updateTempCacheCallback - Callback function to update the temp cache in main.js.
+ * @param {object | null} cachedSummaryFromMain - The cached summary object loaded from the chat file.
  */
-async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools, selectedPlatform, mcpClients) {
+async function handleChatStream(event, messages, model, settings, platformModels, discoveredTools, selectedPlatform, mcpClients, chatId, updateTempCacheCallback, cachedSummaryFromMain) {
     // Assume selectedPlatform is passed in now, along with settings containing relevant API keys.
-    console.log(`Handling chat-stream request. Platform: ${selectedPlatform}, Model: ${model || 'using settings'}, Messages: ${messages?.length}`);
+    console.log(`Handling chat-stream request. ChatID: ${chatId}, Platform: ${selectedPlatform}, Model: ${model || 'using settings'}, Messages: ${messages?.length}`);
+    console.log(`Received initial cache: ${cachedSummaryFromMain ? JSON.stringify(cachedSummaryFromMain) : 'None'}`); // Log received cache
 
     // State for the current turn, including tool call handling
     let accumulatedContent = ""; // Text content from the model
@@ -288,36 +189,59 @@ ${part.content}` }; // Ensure content is included
             return finalMsg;
         }));
 
-        // --- Ensure Context Fits using Accurate Token Count & Truncation ---
-        const contextLimit = modelInfo.context || 8192; // Use model context or default
-        const messagesForApi = ensureContextFits(cleanedMessages, contextLimit, modelToUse);
-        // --- End Context Fitting ---
-
-        // Construct the system prompt (remains the same)
-        let systemPrompt = "You are a helpful assistant capable of using tools. Use tools only when necessary and relevant to the user's request. Format responses using Markdown.";
+        // --- Prepare System Prompt --- (Moved slightly earlier to pass to buildOptimizedHistory)
+        let systemPromptContent = "You are a helpful assistant capable of using tools. Use tools only when necessary and relevant to the user's request. Format responses using Markdown.";
         if (settings.customSystemPrompt && settings.customSystemPrompt.trim()) {
-            systemPrompt += `\n\n${settings.customSystemPrompt.trim()}`;
+            systemPromptContent += `\n\n${settings.customSystemPrompt.trim()}`;
             console.log("Appending custom system prompt.");
         }
-
-        // Prepare OpenAI-compatible API parameters
-        // Conditionally include the system prompt based on platform AND vision limitations
+        // Determine if system prompt should be omitted entirely for the API call (Groq Vision)
         const omitSystemPromptForVision = selectedPlatform === 'groq' && hasImages && modelInfo.vision_supported;
         console.log(`Omit system prompt for vision: ${omitSystemPromptForVision} (Platform: ${selectedPlatform}, Has Images: ${hasImages}, Vision Supported: ${modelInfo.vision_supported})`);
+        const systemPromptForOptimizing = !omitSystemPromptForVision ? { role: "system", content: systemPromptContent } : null;
+        // --- End System Prompt Prep ---
 
+        // --- Ensure Context Fits using Accurate Token Count & Optimization ---
+        const contextLimit = modelInfo.context || 8192; // Use model context or default
+        // Use the cache passed from main.js
+        const currentCachedSummary = cachedSummaryFromMain; // <-- Use the passed argument
+
+        // buildOptimizedHistory is now async and returns an object
+        const { history: messagesForApi, updatedCache: cacheAfterFirstCall } = await buildOptimizedHistory(
+            cleanedMessages,           // Pass the prepared (but full) message history
+            systemPromptForOptimizing, // Pass the system prompt object (or null if omitted)
+            contextLimit,              // Pass the actual model context limit
+            modelToUse,                // Pass modelId for logging
+            currentCachedSummary,      // Pass the current cache state (null for now)
+            settings.openrouterApiKey,  // Pass the API key needed for summarization
+            settings.contextTargetTokenLimit,    // Pass target token limit setting
+            settings.contextEnableSummarization // Pass enable summarization setting
+        );
+
+        // Send updated cache back to main process using the callback
+        if (cacheAfterFirstCall !== currentCachedSummary) {
+            console.log(`[chatHandler] Context summary cache updated after 1st call for chat ${chatId}. Calling update callback.`);
+            if (updateTempCacheCallback) { // Check if callback exists
+                 updateTempCacheCallback(chatId, cacheAfterFirstCall);
+            } else {
+                 console.error("[chatHandler] updateTempCacheCallback is missing!");
+            }
+        }
+        // --- End Context Fitting/Optimization ---
+
+        // --- Prepare API Request Body --- (Moved system prompt construction down)
         const apiRequestBody = {
             messages: [
-                // Conditionally add system prompt
-                ...(!omitSystemPromptForVision ? [{ role: "system", content: systemPrompt }] : []),
-                ...messagesForApi
+                // Conditionally add system prompt *based on the same vision check*
+                ...(systemPromptForOptimizing ? [systemPromptForOptimizing] : []),
+                ...messagesForApi // Use the potentially truncated list from buildOptimizedHistory
             ],
             model: modelToUse,
             temperature: settings.temperature ?? 0.7,
             top_p: settings.top_p ?? 0.95,
             ...(tools.length > 0 && { tools: tools, tool_choice: "auto" }),
             stream: true,
-            // Add max_tokens if available in settings?
-             ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
+            ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
         };
 
         // --- Streaming and Retry Logic using HTTPS ---
@@ -386,11 +310,11 @@ ${part.content}` }; // Ensure content is included
 
                     if (message.startsWith('data: ')) {
                         const dataContent = message.substring(6).trim();
-                        console.log("[RAW STREAM DATA]:", dataContent);
+                        //console.log("[RAW STREAM DATA]:", dataContent);
 
                         if (dataContent === '[DONE]') {
                             // Mark as done, final processing happens in res.on('end')
-                            console.log(`[DONE] received for stream ${streamId}. Final processing in 'end' handler.`);
+                            //console.log(`[DONE] received for stream ${streamId}. Final processing in 'end' handler.`);
                             // We don't set requestAborted here, let 'end' handle final state
                             return; 
                         }
@@ -590,10 +514,36 @@ ${part.content}` }; // Ensure content is included
                     console.log(`Making second API call with ${currentMessageHistory.length} messages...`);
 
                     // Ensure the history for the second call is within context limits *again*
-                    const secondCallHistory = ensureContextFits(currentMessageHistory, contextLimit, modelToUse);
+                    // Use buildOptimizedHistory for the second call as well
+                    // TODO: Decide if we need to pass/update cache state *between* the two calls in a tool-use turn.
+                    // For now, let's assume the state before the *first* call is relevant, or pass null.
+                    // Passing the state *after* the first call might be more correct if summarization happened.
+                    const { history: secondCallOptimizedHistory, updatedCache: cacheAfterSecondCall } = await buildOptimizedHistory(
+                        currentMessageHistory,      // Use the history *including* initial assistant msg + tool results
+                        systemPromptForOptimizing, // Pass the same system prompt object
+                        contextLimit,
+                        modelToUse,
+                        cacheAfterFirstCall,      // Pass the cache state *after* the first optimization
+                        settings.openrouterApiKey, // Pass API key
+                        settings.contextTargetTokenLimit,    // Pass target token limit setting
+                        settings.contextEnableSummarization // Pass enable summarization setting
+                    );
+
+                    // Send updated cache back to main process using the callback (after second call)
+                    if (cacheAfterSecondCall !== cacheAfterFirstCall) {
+                        console.log(`[chatHandler] Context summary cache updated after 2nd call for chat ${chatId}. Calling update callback.`);
+                         if (updateTempCacheCallback) { // Check if callback exists
+                              updateTempCacheCallback(chatId, cacheAfterSecondCall);
+                         } else {
+                              console.error("[chatHandler] updateTempCacheCallback is missing!");
+                         }
+                    }
 
                     const secondApiRequestBody = {
-                        messages: secondCallHistory, // Use updated history
+                        messages: [
+                             ...(systemPromptForOptimizing ? [systemPromptForOptimizing] : []),
+                             ...secondCallOptimizedHistory // Use the optimized history
+                        ],
                         model: modelToUse,
                         temperature: settings.temperature ?? 0.7,
                         top_p: settings.top_p ?? 0.95,
@@ -602,7 +552,7 @@ ${part.content}` }; // Ensure content is included
                         ...(settings.max_tokens && { max_tokens: parseInt(settings.max_tokens, 10) }),
                     };
 
-                    // --- Make the second HTTPS request --- 
+                    // --- Make the second HTTPS request ---
                     const secondReq = https.request({
                         hostname: apiHostname,
                         path: apiPath,

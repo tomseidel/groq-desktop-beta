@@ -77,41 +77,69 @@ Based on best practices, the following strategies could be implemented to improv
 [2] OpenAI Community Forum: Best Practices for Chat Conversation Storage and Context Optimization (<https://community.openai.com/t/best-practices-for-chat-conversation-storage-and-context-optimization-with-openai-api-3-5-turbo/712166>)
 [3] OpenAI Community Forum: How to manage chat history effectively? (<https://community.openai.com/t/how-to-manage-chat-history-effectively/1116419>)
 
-## 7. Phased Implementation Plan
+## 7. Phased Implementation Plan (Revised)
 
-This plan outlines steps to incrementally implement the enhanced context management strategies:
+This revised plan incorporates refined requirements for a more robust and efficient context management system, focusing on caching and preserving the full chat history.
 
-**Phase 1: Thresholding & Basic Summarization**
+**Phase 1: Core Logic & Fixed Token Target**
 
-*   **Goal:** Implement proactive context management using a threshold and introduce the simplest form of summarization.
+*   **Goal:** Establish the foundation for optimized history generation using a fixed token target and preserving the original history.
 *   **Tasks:**
-    1.  **Modify `ensureContextFits` Trigger:** Trigger management based on a percentage threshold (e.g., 85%) of the context limit, not just when exceeding it.
-    2.  **Create `summarizeMessages` Function:** Develop a function to call an LLM (potentially a smaller/faster one) to summarize a given block of messages.
-    3.  **Integrate Summarization into `ensureContextFits`:** When the threshold is exceeded, attempt to summarize the oldest messages. If successful, replace the old messages with a system message containing the summary. If summarization fails, fall back to the current truncation behavior.
-    4.  **Testing:** Verify summarization triggering, message replacement, context fitting, and failure fallback.
+    1.  **Create `buildOptimizedHistory` Function:** This function will *replace* the core logic of `ensureContextFits`.
+        *   **Input:** Full message history array, target token limit (e.g., 50,000), actual model context limit, current `cachedSummary` object (if any).
+        *   **Output:** A *new* array of messages optimized for the API call, or the original prepared history if it fits.
+        *   **Logic:**
+            *   Calculate the effective limit: `min(target_token_limit, actual_model_context_window)`.
+            *   Calculate tokens for the full history (including system prompt).
+            *   If full history fits within the effective limit, return it (prepared).
+            *   If not, proceed to check/use/generate summary (logic detailed in Phase 2).
+        *   **Crucially:** This function *does not modify* the original full message history array.
+    2.  **Integrate `buildOptimizedHistory`:** Modify `chatHandler.js` to call `buildOptimizedHistory` instead of `ensureContextFits`, passing the necessary parameters (including the current cache state, see Phase 2) and using its output for the API call.
+    3.  **Testing:** Verify that the function correctly calculates limits, passes through history when it fits, and correctly identifies when optimization is needed.
 
-**Phase 2: Tool Call Summarization**
+**Phase 2: Summarization & Caching**
 
-*   **Goal:** Specifically address context bloat from tool interactions.
+*   **Goal:** Implement the summarization process using the specified model and integrate the caching mechanism.
 *   **Tasks:**
-    1.  **Identify Completed Tool Sequences:** Add logic to detect `assistant` messages with `tool_calls` followed by their corresponding `tool` result messages.
-    2.  **Enhance/Create Summarization for Tools:** Adapt the summarization function to specifically summarize a tool request and its result(s).
-    3.  **Integrate Tool Summarization:** Modify `ensureContextFits` to prioritize summarizing the oldest completed tool sequence *before* attempting general message summarization.
-    4.  **Testing:** Verify identification and summarization of tool interactions and the impact on token count.
+    1.  **Create `summarizeMessages` Function:**
+        *   Implement a non-streaming HTTPS call to OpenRouter (`api/v1/chat/completions`).
+        *   Use model: `google/gemini-2.0-flash-exp:free`.
+        *   Use a specific, well-crafted system prompt instructing the model to summarize concisely, focusing on relevance to subsequent conversation, and retaining key details.
+        *   Input: Array of messages to summarize.
+        *   Output: Summary text string or an error indicator.
+    2.  **Implement Caching Logic in `buildOptimizedHistory`:**
+        *   When optimization is needed (full history > effective limit):
+            *   Check for a valid `cachedSummary` object (passed as input). A cache is valid if it covers the messages that would need to be removed.
+            *   **If Valid Cache:** Construct API history: `[System Prompt, Summary Message (from cache.text), Recent Messages]`. Ensure total tokens fit within the effective limit.
+            *   **If No/Invalid Cache:**
+                *   Identify messages requiring summarization (older messages beyond the effective limit, potentially including the text of the *old* summary if the cache was invalid).
+                *   Call `summarizeMessages` with these messages.
+                *   On success:
+                    *   Create/Update the `cachedSummary` object (e.g., `{ text: "...", coversMessagesUpToIndex: N }`). Store this object (this will need to be passed back up and persisted).
+                    *   Construct API history using the *new* summary.
+                *   On failure: Fallback (e.g., simple truncation of oldest messages from the *optimized* list, log error).
+    3.  **State Management & Persistence:**
+        *   The `cachedSummary` object needs to be associated with the specific chat session.
+        *   Modify chat loading/saving logic (`main.js`, potentially `ChatContext.jsx` via IPC) to persist and restore the `cachedSummary` object within the chat's JSON file.
+        *   Ensure `chatHandler.js` receives the current `cachedSummary` for a chat and can signal back the updated cache object to be saved.
+    4.  **Testing:** Verify summarization calls, cache creation, cache usage, cache invalidation/update, persistence, and fallback mechanisms. Test with long conversations requiring multiple summary updates.
 
-**Phase 3: Advanced Truncation ("Keep Start/End" - Optional/Alternative)**
+**Phase 3: Tool Call Summarization (Integration)**
 
-*   **Goal:** Provide an alternative strategy if summarization is too slow or costly.
+*   **Goal:** Enhance the summarization process to specifically handle tool calls if needed (potentially less critical with general summarization, but can be added).
 *   **Tasks:**
-    1.  **Add Strategy Choice:** Allow `ensureContextFits` to select behavior based on configuration.
-    2.  **Implement "Keep Start/End" Logic:** If selected, keep the system prompt, the first message, and the last N messages, removing the middle section.
-    3.  **Testing:** Verify correct preservation and removal of messages according to this strategy.
+    1.  **Refine `summarizeMessages` Prompt:** Explicitly instruct the summarization model to concisely represent tool interactions (e.g., "User asked to X, tool Y was run with args Z, result was W").
+    2.  **(Optional) Targeted Tool Summarization:** If general summarization isn't sufficient, modify `buildOptimizedHistory` to identify and potentially summarize *individual* old tool sequences separately before summarizing the remaining old text messages. This adds complexity.
+    3.  **Testing:** Ensure tool calls within the summarized portion are represented adequately in the summary text.
 
 **Phase 4: User Configuration & Refinement**
 
 *   **Goal:** Allow user control and refine the implementation.
 *   **Tasks:**
-    1.  **Add Settings:** Expose options in the UI/settings for strategy selection, threshold percentage, and potentially the summarization model.
-    2.  **Integrate Settings:** Read and apply these settings in `chatHandler.js` / `ensureContextFits`.
-    3.  **Documentation:** Update user guides.
-    4.  **Refinement:** Tune defaults and prompts based on feedback and testing.
+    1.  **Add Settings:** Expose options in the UI/settings for:
+        *   Target Token Limit (default 50,000).
+        *   Enable/Disable Summarization (fallback to simple truncation if disabled).
+        *   (Potentially) Clear Summary Cache for a chat.
+    2.  **Integrate Settings:** Read and apply these settings in `chatHandler.js` / `buildOptimizedHistory`.
+    3.  **Documentation:** Update user guides explaining the caching mechanism and settings.
+    4.  **Refinement:** Tune the summarization prompt, default target limit, and cache validation logic based on testing and feedback.

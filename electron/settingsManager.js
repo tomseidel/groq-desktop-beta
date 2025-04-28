@@ -15,7 +15,12 @@ function loadSettings() {
             top_p: 0.95,
             mcpServers: {},
             disabledMcpServers: [],
-            customSystemPrompt: ''
+            customSystemPrompt: '',
+            contextTargetTokenLimit: 50000,
+            contextEnableSummarization: true,
+            openrouterReferrer: 'https://github.com/tom-englert/groq-desktop-beta',
+            openrouterTitle: 'Groq Desktop (Electron)',
+            max_tokens: null
         };
     }
     const userDataPath = appInstance.getPath('userData');
@@ -27,7 +32,12 @@ function loadSettings() {
         top_p: 0.95,
         mcpServers: {},
         disabledMcpServers: [],
-        customSystemPrompt: ''
+        customSystemPrompt: '',
+        contextTargetTokenLimit: 50000,
+        contextEnableSummarization: true,
+        openrouterReferrer: 'https://github.com/tom-englert/groq-desktop-beta',
+        openrouterTitle: 'Groq Desktop (Electron)',
+        max_tokens: null
     };
 
     try {
@@ -46,6 +56,11 @@ function loadSettings() {
             settings.mcpServers = settings.mcpServers || defaultSettings.mcpServers;
             settings.disabledMcpServers = settings.disabledMcpServers || defaultSettings.disabledMcpServers;
             settings.customSystemPrompt = settings.customSystemPrompt || defaultSettings.customSystemPrompt;
+            settings.contextTargetTokenLimit = settings.contextTargetTokenLimit ?? defaultSettings.contextTargetTokenLimit;
+            settings.contextEnableSummarization = settings.contextEnableSummarization ?? defaultSettings.contextEnableSummarization;
+            settings.openrouterReferrer = settings.openrouterReferrer || defaultSettings.openrouterReferrer;
+            settings.openrouterTitle = settings.openrouterTitle || defaultSettings.openrouterTitle;
+            settings.max_tokens = settings.max_tokens ?? defaultSettings.max_tokens;
 
             // Optional: Persist the potentially updated settings back to file if defaults were applied
             // fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));

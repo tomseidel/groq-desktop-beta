@@ -104,6 +104,7 @@ function App() {
   // --- End Tool Approval State ---
 
   const [lastSavedMessageId, setLastSavedMessageId] = useState(null); // Track last saved message
+  const [activeChatCache, setActiveChatCache] = useState(null); // <-- Add state for cache
 
   const handleRemoveLastMessage = () => {
     setMessages(prev => {
@@ -130,6 +131,7 @@ function App() {
     console.log("[handleNewChat] Called. Current activeChatId:", activeChatId);
     setMessages([]);      // Clear message history
     setActiveChatId(null); // Set active chat ID to null
+    setActiveChatCache(null); // <-- Clear active cache
     setPendingApprovalCall(null); // Clear any pending tool approvals
     setPausedChatState(null); // Clear any paused state
     setLoading(false); // Ensure loading indicator is off
@@ -162,6 +164,7 @@ function App() {
             
             setMessages(loadResult.chatData.messages || []);
             setActiveChatId(loadResult.chatData.id);
+            setActiveChatCache(loadResult.chatData.cachedSummary || null); // <-- Load cache here
 
             // Set platform and model from loaded chat
             const { platform: loadedPlatform, model: loadedModel } = loadResult.chatData;
@@ -506,6 +509,7 @@ ${part.content}` };
             // console.log(`Successfully loaded chat: ${loadResult.chatData.id}`);
             setMessages(loadResult.chatData.messages || []);
             setActiveChatId(loadResult.chatData.id);
+            setActiveChatCache(loadResult.chatData.cachedSummary || null); // <-- Load cache here
             // Set platform and model based on the loaded chat
             // Ensure platform is loaded first before model
             if (loadResult.chatData.platform && allPlatformModels[loadResult.chatData.platform]) {
@@ -687,9 +691,14 @@ ${part.content}` };
         setThinkingSteps(prev => ({ ...prev, [assistantPlaceholder.id]: {} }));
 
         // Start streaming chat
-        // NOTE: We pass the messages *before* adding the placeholder, 
-        // as the backend handles the history.
-        const streamHandler = window.electron.startChatStream(turnMessages, selectedModel);
+        // Pass the current cache state along
+        const currentCache = activeChatCache; // Get cache from state
+
+        // --- >>> ADD THE LOG HERE <<< ---
+        console.log("[App.jsx] Sending chat stream with cache:", currentCache);
+        // --- >>> END OF ADDED LOG <<< ---
+
+        const streamHandler = window.electron.startChatStream(turnMessages, selectedModel, activeChatId, currentCache); // <-- Pass currentCache
 
         // Setup event handlers for streaming
         streamHandler.onStart((startData) => { 
@@ -968,9 +977,14 @@ ${part.content}` };
         setThinkingSteps(prev => ({ ...prev, [assistantPlaceholder.id]: {} }));
 
         // Start streaming chat
-        // NOTE: We pass the messages *before* adding the placeholder, 
-        // as the backend handles the history.
-        const streamHandler = window.electron.startChatStream(initialMessages, selectedModel);
+        // Pass the current cache state along
+        const currentCache = activeChatCache; // Get cache from state
+
+        // --- >>> ADD THE LOG HERE <<< ---
+        console.log("[App.jsx] Sending chat stream with cache:", currentCache);
+        // --- >>> END OF ADDED LOG <<< ---
+
+        const streamHandler = window.electron.startChatStream(initialMessages, selectedModel, activeChatId, currentCache); // <-- Pass currentCache
 
         // Setup event handlers for streaming
         streamHandler.onStart((startData) => { 

@@ -45,6 +45,21 @@ const CHATS_DIR = path.join(app.getPath('userData'), 'chats');
 // Variable to hold loaded model context sizes (Now fetched from APIs)
 let platformModels = { groq: {}, openrouter: {} }; // State to hold fetched models
 
+let appInstance; // To store app instance for userData path
+let tempCacheStore = {}; // In-memory store for pending cache updates
+
+// --- Function to update the temporary cache --- 
+function updateTempCache(chatId, cache) {
+    if (!chatId || !cache) {
+        console.error("[updateTempCache] Invalid arguments.");
+        return;
+    }
+    console.log(`[updateTempCache] Storing cache update for chatId: ${chatId}`);
+    tempCacheStore[chatId] = cache;
+    console.log("Current tempCacheStore state:", JSON.stringify(tempCacheStore));
+}
+// --- End function ---
+
 // --- Model Fetching Functions --- //
 
 /**
@@ -283,13 +298,25 @@ app.whenReady().then(async () => {
   // --- Register Core App IPC Handlers --- //
 
   // Chat completion with streaming - uses chatHandler
-  ipcMain.on('chat-stream', async (event, messages, model) => {
-    const currentSettings = loadSettings(); // Get current settings from settingsManager
-    const { discoveredTools, mcpClients } = getMcpState(); // Get current state from mcpManager
-    const selectedPlatform = currentSettings.selectedPlatform || 'groq'; // Default to groq if not set
+  ipcMain.on('chat-stream', async (event, messages, model, chatId, cachedSummary) => {
+    const currentSettings = loadSettings();
+    const { discoveredTools, mcpClients } = getMcpState();
+    const selectedPlatform = currentSettings.selectedPlatform || 'groq';
     
-    // Pass mcpClients to the handler
-    chatHandler.handleChatStream(event, messages, model, currentSettings, platformModels, discoveredTools, selectedPlatform, mcpClients);
+    // Pass updateTempCache function and cachedSummary as callbacks/arguments
+    chatHandler.handleChatStream(
+        event, 
+        messages, 
+        model, 
+        currentSettings, 
+        platformModels, 
+        discoveredTools, 
+        selectedPlatform, 
+        mcpClients, 
+        chatId,
+        updateTempCache, // Callback to update temp cache
+        cachedSummary    // <-- Pass the received cache here
+    );
   });
 
   // Handler for executing tool calls - uses toolHandler
@@ -378,52 +405,91 @@ app.whenReady().then(async () => {
   });
   // --- End Task 2 ---
 
-  // --- Task 3: Save Chat Handler ---
+  // --- Task 3: Save Chat Handler (MODIFIED - checks tempCacheStore)
   ipcMain.handle('save-chat', async (event, chatData) => {
-    console.log(`IPC Handler: save-chat invoked for ID: ${chatData?.id || 'new'}`);
-    // Validate required fields from frontend (messages, platform, model)
+    const incomingChatId = chatData?.id; // Get ID from incoming data if possible
+    console.log(`IPC Handler: save-chat invoked for ID: ${incomingChatId || 'new'}`);
+    // Validate required fields
     if (!chatData || typeof chatData !== 'object' || !chatData.messages || !chatData.platform || !chatData.model) {
-        console.error("save-chat: Invalid chatData received. Missing messages, platform, or model.", chatData);
-        return { success: false, error: "Invalid chat data received (missing required fields)" };
+        console.error("save-chat: Invalid chatData received.");
+        return { success: false, error: "Invalid chat data received" };
     }
 
-    const chatId = chatData.id || uuidv4(); // Use existing ID or generate a new one
+    const chatId = incomingChatId || uuidv4(); // Use existing ID or generate a new one
     const chatFilePath = path.join(CHATS_DIR, `${chatId}.json`);
     const now = new Date().toISOString();
 
+    let existingCreatedAt = null;
+    let finalCachedSummary = chatData.cachedSummary || null; // Start with incoming cache if any
+
+    // --- Read existing file FIRST to preserve createdAt and potentially older cache ---
+    try {
+        if (fs.existsSync(chatFilePath)) {
+            const existingContent = await fs.promises.readFile(chatFilePath, 'utf-8');
+            const existingData = JSON.parse(existingContent);
+            // Keep the oldest createdAt timestamp
+            existingCreatedAt = existingData.createdAt || existingCreatedAt;
+            // If no summary came from frontend, check the existing file
+            if (!finalCachedSummary) {
+                finalCachedSummary = existingData.cachedSummary || null;
+            }
+            console.log(`[save-chat] Read existing file for ${chatId}. Preserving createdAt: ${existingCreatedAt}. Initial cache from FE/file: ${!!finalCachedSummary}`);
+        } else {
+            console.log(`[save-chat] No existing file found for ${chatId}.`);
+        }
+    } catch (readError) {
+        console.error(`[save-chat] Error reading existing file ${chatFilePath} (continuing):`, readError);
+    }
+    // --- End read existing file ---
+
+    // --- Check for TEMPORARY cache update from chatHandler --- 
+    if (tempCacheStore[chatId]) {
+        console.log(`[save-chat] Found temporary cache update for ${chatId}. Merging.`);
+        finalCachedSummary = tempCacheStore[chatId]; // Overwrite with the latest cache
+        delete tempCacheStore[chatId]; // Clear from temp store
+    } else {
+         console.log(`[save-chat] No temporary cache update found in memory for ${chatId}.`);
+    }
+    // --- End check for temporary cache ---
+
     const dataToSave = {
-        // Spread all properties sent from frontend, ensuring we capture platform/model
+        // Spread properties sent from frontend (messages, title, platform, model etc.)
         ...chatData,
         id: chatId, // Ensure the ID is set/updated
         lastModified: now,
-        createdAt: chatData.createdAt || now, // Set createdAt only if it doesn't exist
-        // Explicitly ensure platform and model are saved (though covered by spread)
-        platform: chatData.platform,
-        model: chatData.model
+        createdAt: existingCreatedAt || chatData.createdAt || now, // Use oldest known createdAt
+        // Add/Update the final cached summary
+        ...(finalCachedSummary && { cachedSummary: finalCachedSummary }), // Add only if not null
     };
 
-    // Basic title generation if missing (can be improved later)
+    // Remove potentially null cache if it wasn't found/set
+    if (!dataToSave.cachedSummary) {
+        delete dataToSave.cachedSummary;
+    }
+
+    // Basic title generation if missing
     if (!dataToSave.title) {
         const firstUserMessage = dataToSave.messages.find(m => m.role === 'user')?.content;
         if (typeof firstUserMessage === 'string' && firstUserMessage.trim()) {
             dataToSave.title = firstUserMessage.substring(0, 50) + (firstUserMessage.length > 50 ? '...' : '');
         } else {
-            dataToSave.title = `Chat ${new Date(dataToSave.createdAt).toLocaleString()}`; // Fallback title
+            dataToSave.title = `Chat ${new Date(dataToSave.createdAt || now).toLocaleString()}`; // Fallback title
         }
-        console.log(`Generated title for chat ${chatId}: ${dataToSave.title}`);
+        console.log(`[save-chat] Generated title for chat ${chatId}: ${dataToSave.title}`);
     }
 
     try {
       await fs.promises.writeFile(chatFilePath, JSON.stringify(dataToSave, null, 2), 'utf-8');
-      console.log(`Chat saved successfully: ${chatFilePath}`);
-      // Return the potentially updated/new data (especially title/id/timestamps)
+      console.log(`[save-chat] Chat saved successfully (Cache included: ${!!dataToSave.cachedSummary}): ${chatFilePath}`);
       return { success: true, savedChatData: dataToSave };
     } catch (error) {
-      console.error(`Error saving chat ${chatId}:`, error);
+      console.error(`[save-chat] Error saving chat ${chatId}:`, error);
+      // Ensure temp cache is cleaned up even on error?
+      if (tempCacheStore[chatId]) delete tempCacheStore[chatId]; 
       return { success: false, error: error.message };
     }
   });
-  // --- End Task 3 ---
+  // --- End Task 3 --- 
 
   // --- Task 4: Load Chat Handler ---
   ipcMain.handle('load-chat', async (event, chatId) => {
