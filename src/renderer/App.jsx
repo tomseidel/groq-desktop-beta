@@ -86,7 +86,9 @@ function App() {
   // Store the list of models from capabilities keys
   // const models = Object.keys(MODEL_CONTEXT_SIZES).filter(key => key !== 'default'); // Old way
   const [modelConfigs, setModelConfigs] = useState({}); // State for model configurations
-  const [models, setModels] = useState([]); // State for model list (now platform-specific)
+  const [models, setModels] = useState([]); // State for raw model list (now platform-specific)
+  const [sortedModels, setSortedModels] = useState([]); // State for the displayed, sorted model list
+  const [modelSortOrder, setModelSortOrder] = useState('alpha'); // 'alpha', 'context', etc.
 
   // State for current model's vision capability
   // const [visionSupported, setVisionSupported] = useState(false); // REMOVED STATE
@@ -329,7 +331,7 @@ ${part.content}` };
           setAllPlatformModels(prev => ({ ...prev, [platform]: platformConfigs }));
 
           const availableModels = Object.keys(platformConfigs).filter(key => key !== 'default');
-          setModels(availableModels); // Update UI dropdown list
+          setModels(availableModels); // Update raw list
 
           // Set a default model if the list isn't empty
           if (availableModels.length > 0) {
@@ -345,6 +347,9 @@ ${part.content}` };
           } else {
               setSelectedModel(''); // No models available
           }
+
+          // Initially sort alphabetically and update the sorted list state
+          setSortedModels([...availableModels].sort()); 
 
       } catch (error) {
           console.error(`Error loading models for platform ${platform}:`, error);
@@ -1511,6 +1516,30 @@ ${part.content}` };
     // ... existing code ...
   };
 
+  // Effect to re-sort models when the raw list or sort order changes
+  useEffect(() => {
+    const sortModels = () => {
+      const modelsToSort = [...models]; // Work with a copy
+
+      if (modelSortOrder === 'alpha') {
+        modelsToSort.sort();
+      } else if (modelSortOrder === 'context') {
+        // Sort by context window size (descending)
+        const currentPlatformConfigs = allPlatformModels[selectedPlatform] || {};
+        modelsToSort.sort((a, b) => {
+          const contextA = currentPlatformConfigs[a]?.context_window || 0;
+          const contextB = currentPlatformConfigs[b]?.context_window || 0;
+          return contextB - contextA; // Descending order
+        });
+      }
+      // Add other sorting criteria here if needed
+
+      setSortedModels(modelsToSort);
+    };
+
+    sortModels();
+  }, [models, modelSortOrder, selectedPlatform, allPlatformModels]); // Re-run when models, order, platform, or configs change
+
   return (
     <div className="flex flex-row h-screen bg-gray-900">
       {/* --- Chat List Sidebar --- */}
@@ -1535,13 +1564,26 @@ ${part.content}` };
                   id="model-select"
                   value={selectedModel}
                   onChange={(e) => setSelectedModel(e.target.value)}
-                  className="border border-gray-500 rounded-md bg-transparent text-white"
+                  className="border border-gray-500 rounded-md bg-transparent text-white min-w-[150px] mr-2"
                 >
-                  {models.map(model => (
-                    <option key={model} value={model}>{model}</option>
+                  {sortedModels.map(model => (
+                    <option key={model} value={model} className="text-black">{model}</option>
                   ))}
                 </select>
+                {/* Sort Order Dropdown */} 
+                <select
+                  id="model-sort-order"
+                  value={modelSortOrder}
+                  onChange={(e) => setModelSortOrder(e.target.value)}
+                  className="border border-gray-500 rounded-md bg-transparent text-white text-xs p-1"
+                  title="Sort models"
+                >
+                  <option value="alpha" className="text-black">Sort A-Z</option>
+                  <option value="context" className="text-black">Sort by Context</option>
+                  {/* Add other sort options here if needed */}
+                </select>
               </div>
+              
               <div className="flex items-center">
                 <label htmlFor="platform-select" className="mr-3 text-gray-300 font-medium">Platform:</label>
                 <select
@@ -1550,8 +1592,8 @@ ${part.content}` };
                   onChange={(e) => handlePlatformChange(e.target.value)}
                   className="border border-gray-500 rounded-md bg-transparent text-white"
                 >
-                  <option value="groq">Groq</option>
-                  <option value="openrouter">OpenRouter</option>
+                  <option value="groq" className="text-black">Groq</option>
+                  <option value="openrouter" className="text-black">OpenRouter</option>
                 </select>
               </div>
               <Link to="/settings" className="btn btn-primary">Settings</Link>
